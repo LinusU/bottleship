@@ -35,6 +35,7 @@ GOG extraction does not establish gameplay coverage for that installer edition.
 | Need for Speed: Porsche Unleashed | playable\* | |
 | Need for Speed: Underground | playable | |
 | Need for Speed: Underground 2 | playable | |
+| Midtown Madness 2 (trial) | playable | |
 | Carmageddon 2: Carpocalypse Now | playable | ✓ |
 | Star Wars Episode I: Racer | playable | ✓ |
 | Unreal Gold | playable | |
@@ -122,6 +123,7 @@ full playability.
 | Gothic USA demo 1.08h | English demo: Diego dialogue exit, rendered subtitles/HUD, movement and native saving verified. WGB recreates the required save directories; slots and thumbnails survive page reload. Restoring a saved game can stall in a resource-thread wait; further stability testing is pending | ✓ |
 | Cossacks: European Wars demo | Original Wise demo: rendered menu and playable random map; primary scanout and palette animation verified. Native Slow mode with a 50 ms interval gives 20 simulation steps/s | ✓ |
 | Thief Gold demo | Original demo: menu, Thieves Guild mission, movement and mouse look verified. Bundle includes the installer-generated install.cfg pointing at its root-level resource archives; without it the guest dereferences a missing interface image | ✓ |
+| Midtown Madness 2 trial | Original trial version: first-run licence dialog, menus, vehicle selection and San Francisco Cruise verified, with keyboard driving, traffic, pedestrians, the pause menu and a clean exit through the closing screen. A Checkpoint race in the Mini Cooper was played by hand. Driver profile, graphics settings and the licence acceptance persist across page reload. The game selects 800 × 600, 16-bit Direct3D itself. A race against six opponents runs at roughly a third of Cruise's frame rate. Multiplayer is unverified | ✓ |
 | [Mafia original demo](https://archive.org/details/Mafia_201405) | Rendered mission with a car, city and HUD. WGB includes the native Setup registry value for 1024 × 768, 32-bit fullscreen startup; fresh launch bypasses Setup | ✓ |
 | [Carmageddon II demo](https://archive.org/details/Carmageddon2CarpocalypseNowDemo) | Rendered Controls screen; race entry remains unverified | ✓ |
 | [Painkiller Demo 2](https://archive.org/details/Painkiller_Demo_2_build_v1.0) | Rendered main menu; level entry remains unverified | ✓ |
@@ -135,6 +137,10 @@ These four original installers use the project's own readers: Mafia's RAR4 LZ pa
 and Worms World Party's RAR4 → InstallShield cabinet set (625 files, outer CRC and inner
 size/MD5 verified). The captured Mafia settings and repack command are recorded in
 [`demo-presets/README.md`](demo-presets/README.md).
+
+The Midtown Madness 2 trial is a Microsoft Cabinet self-extractor with LZX folders (13 files);
+`cab-extract` output matches an independent extraction byte for byte. It needs no preset:
+pack the extracted directory as it is, with `mm2trial.exe` as the entry point.
 
 Time-limited shareware trials are excluded from the demo catalog, including Alice Greenfingers,
 Montezuma, Natalie Brooks, Farm Frenzy and House of 1000 Doors.

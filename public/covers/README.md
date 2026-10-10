@@ -36,5 +36,6 @@ Sources for the demo covers added in October 2026:
 | `painkiller-box.jpg` | Painkiller (2004), original PC box | [LaunchBox PC cover scan](https://images.launchbox-app.com/b3863093-8d47-452c-9a2a-12ef7c2dbf68.jpg) |
 | `worms-world-party-box.jpg` | Worms World Party (2001), original PC box | [LaunchBox PC cover scan](https://images.launchbox-app.com/0a9b2dd5-ddb3-4135-b30b-0298e8b7d8e8.jpg) |
 | `blade-of-darkness-box.jpg` | Severance: Blade of Darkness (2001), original United Kingdom PC box | [LaunchBox PC cover scan](https://images.launchbox-app.com/d9e09e84-0374-422b-af17-763f9bb1ec76.jpg) |
+| `midtown-madness-2-box.jpg` | Midtown Madness 2 (2000), original North American PC box | Front cover scan supplied by the contributor, 252 × 294 |
 
 Artwork remains copyright of its respective owners.
