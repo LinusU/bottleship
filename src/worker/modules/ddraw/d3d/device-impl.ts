@@ -47,6 +47,8 @@ import {
     D3DVIEWPORT7_SIZE,
     D3DVIEWPORT7_OFFSETS,
     E_INVALIDARG,
+    DDERR_INVALIDPARAMS,
+    DDERR_OUTOFMEMORY,
 } from "../constants";
 import { ComObjectFactory } from "../../../core/com/base-com-object";
 import { allocateComObject } from "../../../core/com/com-memory";
@@ -74,6 +76,7 @@ import {
 import { setDeviceRenderTarget } from "./texture-manager";
 import { surfaceSyncManager, syncActiveGdiContextBeforeD3D } from "../surface-sync";
 import { createDeviceStubsExports } from "./device-impl-stubs";
+import { packStridedVertices, stridedPlan, StridedScratch } from "./strided-draw";
 import { frustumPlanesFromCombined, sphereVisibilityBits, clipBitsToD3dVis } from "./sphere-visibility";
 import {
     fillDeviceDesc,
@@ -1213,6 +1216,32 @@ export const createDeviceExports = (
         return D3D_OK;
     };
 
+    const stridedScratch = new StridedScratch();
+
+    /** DrawPrimitiveStrided / DrawIndexedPrimitiveStrided of either device generation. */
+    const drawStrided = (
+        mem: Uint8Array, devicePtr: number, primType: number, fvf: number, lpStrided: number,
+        vertexCount: number, indexed: boolean, lpIndices: number, indexCount: number,
+    ): number => {
+        // An empty draw succeeds without looking at the vertex data.
+        if (vertexCount === 0 || (indexed && indexCount === 0)) return D3D_OK;
+        const plan = stridedPlan(fvf);
+        if (!plan) return DDERR_INVALIDPARAMS;
+        const vertices = stridedScratch.reserve(context.process.memory, vertexCount * plan.stride);
+        if (!vertices) return DDERR_OUTOFMEMORY;
+        if (!packStridedVertices(mem, lpStrided, plan, vertexCount, vertices)) return DDERR_INVALIDPARAMS;
+        drawHandler.handleDrawPrimitive(devicePtr, primType, fvf, vertices, vertexCount, mem, indexed, lpIndices, indexCount);
+        return D3D_OK;
+    };
+
+    // IDirect3DDevice7::DrawPrimitiveStrided(this, primType, fvf, lpStrided, vertexCount, flags)
+    exports["IDirect3DDevice7_DrawPrimitiveStrided"] = (ctx, mem, args) =>
+        drawStrided(mem, args[0], args[1], args[2], args[3], args[4], false, 0, 0);
+
+    // IDirect3DDevice7::DrawIndexedPrimitiveStrided(this, primType, fvf, lpStrided, vertexCount, lpIndices, indexCount, flags)
+    exports["IDirect3DDevice7_DrawIndexedPrimitiveStrided"] = (ctx, mem, args) =>
+        drawStrided(mem, args[0], args[1], args[2], args[3], args[4], true, args[5], args[6]);
+
     exports["IDirect3DDevice7_DrawPrimitive"] = (ctx, mem, args) => {
         const threadId = System.getInstance().scheduler?.getCurrentThreadId?.() ?? 0;
         Logger.verbose(LogCategory.DDRAW, `[TID=${threadId}] IDirect3DDevice7_DrawPrimitive: type=${args[1]} vtype=0x${args[2].toString(16)} count=${args[4]}`);
@@ -1856,14 +1885,9 @@ export const createDeviceExports = (
         return D3D_OK;
     };
 
-    // Strided draw: full implementation needed for games like Quake 2 (D3D mode) that use LPD3DDRAWPRIMITIVESTRIDEDDATA.
-    exports["IDirect3DDevice3_DrawPrimitiveStrided"] = (ctx, mem, args) => {
-        const type = args[1];
-        const vtype = args[2];
-        const count = args[4];
-        Logger.verbose(LogCategory.SYSTEM, `IDirect3DDevice3_DrawPrimitiveStrided: type=${type} vtype=${vtype} count=${count}`);
-        return D3D_OK;
-    };
+    // IDirect3DDevice3::DrawPrimitiveStrided(this, primType, fvf, lpStrided, vertexCount, flags)
+    exports["IDirect3DDevice3_DrawPrimitiveStrided"] = (ctx, mem, args) =>
+        drawStrided(mem, args[0], args[1], args[2], args[3], args[4], false, 0, 0);
 
     exports["IDirect3DDevice3_DrawIndexedPrimitive"] = (ctx, mem, args) => {
         Logger.verbose(LogCategory.SYSTEM, `IDirect3DDevice3_DrawIndexedPrimitive: type=${args[1]} vtype=0x${args[2].toString(16)} vCount=${args[4]} iCount=${args[6]}`);
@@ -1903,15 +1927,9 @@ export const createDeviceExports = (
         return D3D_OK;
     };
 
-    // Strided indexed draw: full implementation needed for games like Quake 2 (D3D mode).
-    exports["IDirect3DDevice3_DrawIndexedPrimitiveStrided"] = (ctx, mem, args) => {
-        const type = args[1];
-        const vtype = args[2];
-        const vCount = args[4];
-        const iCount = args[6];
-        Logger.log(LogCategory.SYSTEM, `IDirect3DDevice3_DrawIndexedPrimitiveStrided: type=${type} vtype=${vtype} vCount=${vCount} iCount=${iCount}`);
-        return D3D_OK;
-    };
+    // IDirect3DDevice3::DrawIndexedPrimitiveStrided(this, primType, fvf, lpStrided, vertexCount, lpIndices, indexCount, flags)
+    exports["IDirect3DDevice3_DrawIndexedPrimitiveStrided"] = (ctx, mem, args) =>
+        drawStrided(mem, args[0], args[1], args[2], args[3], args[4], true, args[5], args[6]);
 
     exports["IDirect3DDevice3_AddViewport"] = (ctx, mem, args) => {
         const thisPtr = args[0];

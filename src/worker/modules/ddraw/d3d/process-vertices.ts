@@ -52,6 +52,8 @@ function texCoordComponents(fvf: number, stage: number): number {
 interface FvfLayout {
     posType: number;
     posOffset: number;
+    /** Position plus any blend weights. */
+    positionBytes: number;
     normalOffset: number;   // -1 when absent
     diffuseOffset: number;  // -1 when absent
     specularOffset: number; // -1 when absent
@@ -88,7 +90,7 @@ export function fvfLayout(fvf: number): FvfLayout | null {
         texComponents.push(n);
         off += n * 4;
     }
-    return { posType, posOffset: 0, normalOffset, diffuseOffset, specularOffset, texOffsets, texComponents, stride: off };
+    return { posType, posOffset: 0, positionBytes: posBytes, normalOffset, diffuseOffset, specularOffset, texOffsets, texComponents, stride: off };
 }
 
 export interface ProcessVerticesRequest {
