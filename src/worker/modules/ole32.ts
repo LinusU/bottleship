@@ -923,6 +923,13 @@ export class Ole32 implements IModule {
         const interfaceRegistry = InterfaceRegistry.getInstance();
         const process = this.process;
 
+        // DirectMusic classes answer for their own interfaces: one object is reached as
+        // several (IDirectMusicObject, IPersistStream, the class's own), none by IID alone.
+        const dmusic = this.process.modules.get("dmusic") as
+            { coCreateInstance?: (clsid: string, iid: string, ppv: number) => number | null } | undefined;
+        const dmusicResult = dmusic?.coCreateInstance?.(clsidNormalized, iidNormalized, ppv);
+        if (dmusicResult !== undefined && dmusicResult !== null) return dmusicResult;
+
         let targetIID = iidNormalized;
         if (clsidNormalized === "d7b70ee0-4340-11cf-b063-0020afc2cd35") {
             if (!interfaceRegistry.isRegistered(iidNormalized)) {
@@ -954,24 +961,6 @@ export class Ole32 implements IModule {
             return REGDB_E_CLASSNOTREG;
         } else if (clsidNormalized === "5959df60-2911-11d1-b049-0020af30269a") {
             Logger.warn(LogCategory.COM, `CoCreateInstance: Immersion TouchSense CLSID ${clsidStr} not supported, returning REGDB_E_CLASSNOTREG`);
-            if (ppv) view.setUint32(ppv, 0, true);
-            return REGDB_E_CLASSNOTREG;
-        } else if (clsidNormalized === "d2ac2892-b39b-11d1-8704-00600893b1bd"
-                || clsidNormalized === "d2ac2891-b39b-11d1-8704-00600893b1bd") {
-            // CLSID_DirectMusicLoader (and its DX7 spelling). ZenGin treats a failure here
-            // as fatal for the whole music system and re-raises an error box forever.
-            const dm = this.process.modules.get("dmusic") as { createLoader?: (pp: number) => number } | undefined;
-            if (dm?.createLoader) return dm.createLoader(ppv);
-            if (ppv) view.setUint32(ppv, 0, true);
-            return REGDB_E_CLASSNOTREG;
-        } else if (clsidNormalized === "d2ac2881-b39b-11d1-8704-00600893b1bd") {
-            const dm = this.process.modules.get("dmusic") as { createPerformance?: (pp: number) => number } | undefined;
-            if (dm?.createPerformance) return dm.createPerformance(ppv);
-            if (ppv) view.setUint32(ppv, 0, true);
-            return REGDB_E_CLASSNOTREG;
-        } else if (clsidNormalized === "d2ac2890-b39b-11d1-8704-00600893b1bd") {
-            const dm = this.process.modules.get("dmusic") as { createComposer?: (pp: number) => number } | undefined;
-            if (dm?.createComposer) return dm.createComposer(ppv);
             if (ppv) view.setUint32(ppv, 0, true);
             return REGDB_E_CLASSNOTREG;
         } else if (clsidNormalized === "e436ebb3-524f-11ce-9f53-0020af0ba770") {
