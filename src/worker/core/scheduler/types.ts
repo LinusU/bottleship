@@ -389,6 +389,7 @@ export const enum TimerKind {
     DSOUND_NOTIFY = 5,
     MSS_TIMER = 6,
     QUARTZ_VIDEO = 7,
+    DMUSIC_SYNTH = 8,
 }
 
 // ─── Scheduler Configuration ────────────────────────────────────────────────────
