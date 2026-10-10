@@ -162,6 +162,16 @@ export function registerAudioCommands(svc: HarnessService): void {
         return ds?.getAudioDebugState?.() ?? { error: "no dsound module" };
     });
 
+    /** dmusicState() — what DirectMusic is playing: per port its output buffer, live
+     *  voices and note counts, the tempo, and each segment's pattern, groove level and
+     *  measure. `notes.noInstrument` / `notes.noRegion` are notes the score played that
+     *  could not sound — a band whose collection did not load, or a key outside every
+     *  region — which is how music "plays" in every cursor and is missing from the mix. */
+    svc.register("dmusicState", async () => {
+        const dmusic: any = getModule("dmusic");
+        return dmusic?.describe?.() ?? { error: "no dmusic module" };
+    });
+
     /** audioSignal({reset?}) — "is there sound?" answered end-to-end, without ears.
      *
      *  Cursors advancing prove the pump runs; they do NOT prove anything is audible.
