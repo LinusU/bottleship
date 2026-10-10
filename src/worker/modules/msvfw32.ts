@@ -10,6 +10,8 @@ import { IModule } from "../core/module";
 import { Process } from "../core/process";
 import { ThunkImplementation } from "../core/thunking/thunk-dispatcher";
 import { Logger, LogCategory } from "../core/logger";
+import { Marshaler } from "../core/memory/marshaler";
+import { MCIWND_CLASS_NAME, createMciWnd, ensureMciWndClass } from "./msvfw32-mciwnd";
 
 /** Fake HDRAWDIB handle — just a non-zero sentinel */
 let nextDrawDibHandle = 0xDD000001;
@@ -18,6 +20,7 @@ export class Msvfw32 implements IModule {
     name = "msvfw32";
     exports: Record<string, ThunkImplementation> = {};
     private process!: Process;
+    private mciWndClassNamePtr = 0;
 
     initialize(process: Process): void {
         this.process = process;
@@ -41,6 +44,20 @@ export class Msvfw32 implements IModule {
         const videoForWindowsVersion = () => 0x040003B6;
         this.exports["VideoForWindowsVersion"] = videoForWindowsVersion;
         this.exports["ord_2"] = videoForWindowsVersion;
+
+        // MCIWndCreate(hwndParent, hInstance, dwStyle, szFile) → HWND
+        const mciWndCreate = (wide: boolean): ThunkImplementation => (ctx, mem, args) => {
+            const file = !args[3] ? ""
+                : wide ? Marshaler.readWideString(mem, args[3]) : Marshaler.readString(mem, args[3]);
+            return createMciWnd(ctx, mem, args[0] >>> 0, args[1] >>> 0, args[2] >>> 0, file, this.mciWndClassName(mem));
+        };
+        this.exports["MCIWndCreate"] = mciWndCreate(false);
+        this.exports["MCIWndCreateA"] = mciWndCreate(false);
+        this.exports["MCIWndCreateW"] = mciWndCreate(true);
+        this.exports["MCIWndRegisterClass"] = () => {
+            ensureMciWndClass();
+            return 1;
+        };
 
         // DrawDibOpen() → HDRAWDIB
         this.exports["DrawDibOpen"] = (_ctx, _mem, _args) => {
@@ -94,5 +111,16 @@ export class Msvfw32 implements IModule {
         };
     }
 
-    reset(): void {}
+    /** The class name as a guest string, which is how CreateWindowEx takes it. */
+    private mciWndClassName(mem: Uint8Array): number {
+        if (!this.mciWndClassNamePtr) {
+            this.mciWndClassNamePtr = this.process.memory.alloc(MCIWND_CLASS_NAME.length + 1, "HEAP", "rw");
+            Marshaler.writeString(mem, this.mciWndClassNamePtr, MCIWND_CLASS_NAME);
+        }
+        return this.mciWndClassNamePtr;
+    }
+
+    reset(): void {
+        this.mciWndClassNamePtr = 0;
+    }
 }

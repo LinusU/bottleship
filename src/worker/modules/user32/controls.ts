@@ -428,6 +428,9 @@ export function paintSystemControl(
         case 'sysanimate32_class':
             if (clipped) ctx.restore();
             return false;
+        case 'mciwndclass':
+            paintWindowBorder(ctx, child, absX, absY, w, h);
+            break;
         case 'edit':
             paintEdit(ctx, child, absX, absY, w, h);
             break;
@@ -465,6 +468,23 @@ export function paintSystemControl(
     if (paintTraceEnabled) logChromeStamp(child.handle, `${controlClass} ${w}x${h}`);
     gdi.setOverlayDirty(true);
     return true;
+}
+
+/**
+ * The WS_BORDER frame of a control whose client area somebody else draws (an MCIWnd's is
+ * the movie): USER paints the one-pixel COLOR_WINDOWFRAME line and nothing inside it.
+ */
+function paintWindowBorder(
+    ctx: OffscreenCanvasRenderingContext2D,
+    child: WindowInfo, x: number, y: number, w: number, h: number,
+): void {
+    const WS_BORDER = 0x00800000;
+    if (!(child.style & WS_BORDER)) return;
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(x, y, w, 1);
+    ctx.fillRect(x, y + h - 1, w, 1);
+    ctx.fillRect(x, y, 1, h);
+    ctx.fillRect(x + w - 1, y, 1, h);
 }
 
 /** Diagnostic overlay-geometry tint (see control-tint.ts); off in normal operation. */

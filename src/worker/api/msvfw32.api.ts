@@ -39,9 +39,12 @@ export const msvfw32Module: ModuleDescriptor = {
         makeFunc("VideoForWindowsVersion", 0),
         makeFunc("ord_2", 0, { ordinal: 2 }),
 
-        // HWND hwndParent, HINSTANCE hInstance, DWORD dwStyle, LPCTSTR szFile.
-        makeFunc("MCIWndCreateA", 4, { onUnimplemented: "zero" }),
-        makeFunc("MCIWndCreateW", 4, { onUnimplemented: "zero" }),
+        // HWND hwndParent, HINSTANCE hInstance, DWORD dwStyle, LPCTSTR szFile. VFWAPIV:
+        // the MCIWnd entry points are cdecl. The undecorated name is the ANSI one.
+        makeFunc("MCIWndCreate", 4, { callingConvention: "cdecl" }),
+        makeFunc("MCIWndCreateA", 4, { callingConvention: "cdecl" }),
+        makeFunc("MCIWndCreateW", 4, { callingConvention: "cdecl" }),
+        makeFunc("MCIWndRegisterClass", 0, { callingConvention: "cdecl" }),
 
         // DrawDib API
         makeFunc("DrawDibOpen", 0),              // → HDRAWDIB
