@@ -2323,6 +2323,11 @@ export class WinMM implements IModule {
         resetWinmmJoystick();
     }
 
+    /** The MCI subsystem, for HLE modules layered on it (msvfw32's MCIWnd). */
+    getMci(): WinmmMci | null {
+        return this.mci;
+    }
+
     /** Diagnostic snapshot for paint-time guest-state logging. */
     formatMciDiagnosticSnapshot(): string {
         return this.mci?.formatMciDiagnosticSnapshot() ?? 'mci=none';

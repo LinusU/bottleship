@@ -1336,6 +1336,27 @@ export class WinmmMci {
 
     // ==================== MCI string interface ====================
 
+    /**
+     * The string interface for in-process clients — MCIWnd drives its device with the same
+     * commands a guest would send. A play that parks its caller (video open is async) is
+     * started and not awaited: `status mode` is how such a client follows it.
+     */
+    executeString(command: string, hwndCallback: number = 0): { error: number; value: string } {
+        let value = "";
+        const result = this.sendMciString(command, hwndCallback, (v) => { value = v; });
+        if (typeof result === "number") return { error: result, value };
+        if (result instanceof Promise) {
+            result.catch((e) => Logger.error(LogCategory.SYSTEM, `MCI "${command}" failed: ${e}`));
+            return { error: MMSYSERR_NOERROR, value };
+        }
+        return { error: (result.value ?? MMSYSERR_NOERROR) >>> 0, value };
+    }
+
+    /** Device id behind an alias or element name, 0 when none is open. */
+    deviceIdOf(nameOrAlias: string): number {
+        return this.findMciDevice(nameOrAlias)?.id ?? 0;
+    }
+
     /** Shared body of mciSendStringA/W; `emit` writes the command's return string.
      *  Video playback with MCI_WAIT parks the thunk, hence the ThunkResult union. */
     private sendMciString(
