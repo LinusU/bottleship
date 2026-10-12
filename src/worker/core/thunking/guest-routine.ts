@@ -10,6 +10,8 @@
  */
 import { Logger, LogCategory } from "../logger";
 import { System } from "../system";
+import { isValidAddress } from "../memory/address-guard";
+import { Mem } from "../memory/mem-accessor";
 import type { ThunkResult, X86Context } from "./thunk-dispatcher";
 
 export interface GuestCall {
@@ -30,32 +32,81 @@ export function runGuestRoutine(
     ctx: X86Context, mem: Uint8Array, routine: GuestRoutine, stackCleanup: number, tag: string,
 ): number | ThunkResult {
     const E_FAIL = 0x80004005;
-    const callbackManager = System.getInstance().process?.dispatcher?.callbackManager;
+    const system = System.getInstance();
+    const process = system.process;
+    const generation = process?.resetGeneration;
+    const ownerThread = system.scheduler.getCurrentThreadId();
+    const callbackManager = process?.dispatcher?.callbackManager;
+    const entryEsp = ctx.esp >>> 0;
+    const extent = 4 + stackCleanup;
+    if (!Number.isSafeInteger(stackCleanup) || stackCleanup < 0 || (stackCleanup & 3) !== 0
+        || entryEsp + extent > mem.length || !isValidAddress(mem, entryEsp, extent, "r")) {
+        routine.return(E_FAIL);
+        return E_FAIL;
+    }
     const view = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
-    const returnAddr = view.getUint32(ctx.esp, true) >>> 0;
-    const postEsp = (ctx.esp + 4 + stackCleanup) >>> 0;
+    const returnAddr = view.getUint32(entryEsp, true) >>> 0;
+    const postEsp = entryEsp + extent;
+    if (!returnAddr || returnAddr >= mem.length || !isValidAddress(mem, returnAddr, 1, "rx")) {
+        routine.return(E_FAIL);
+        return E_FAIL;
+    }
 
     let firstCallbackId = 0;
+    let finished = false;
+    const isLive = (): boolean => system.process === process && process?.resetGeneration === generation
+        && process?.dispatcher?.callbackManager === callbackManager && !system.isExiting
+        && system.scheduler.getCurrentThreadId() === ownerThread;
+    const cancel = (): void => {
+        if (finished) return;
+        finished = true;
+        // Run JS finally blocks, but never dispatch guest Release calls during teardown.
+        try {
+            let step = routine.return(E_FAIL);
+            while (!step.done) step = routine.next(E_FAIL);
+        } catch (e) {
+            Logger.warn(LogCategory.SYSTEM, `${tag}: cleanup threw: ${e}`);
+        }
+    };
     const advance = (input: number): number | null => {
         for (;;) {
+            if (finished) return E_FAIL;
+            if (!isLive()) {
+                cancel();
+                return E_FAIL;
+            }
             let step: IteratorResult<GuestCall, number>;
             try {
                 step = routine.next(input >>> 0);
             } catch (e) {
                 Logger.warn(LogCategory.SYSTEM, `${tag}: routine threw: ${e}`);
+                cancel();
                 return E_FAIL;
             }
-            if (step.done) return step.value >>> 0;
+            if (step.done) { finished = true; return step.value >>> 0; }
 
             const call = step.value;
-            if (!call.fn || !callbackManager) {
+            if (!call.fn || !callbackManager || (call.fn >>> 0) >= (Mem.getView()?.length ?? mem.length)
+                || !isValidAddress(call.fn >>> 0, 1, "rx")) {
                 input = E_FAIL;
                 continue;
             }
-            const invoked = callbackManager.invokeCallback(
-                call.fn, call.args, 0, undefined, false, call.tag, undefined,
-                { directThunkReturn: { returnAddr, postEsp, complete: (ret: number): number | null => advance(ret) } },
-            );
+            let invoked: { callbackId: number };
+            try {
+                invoked = callbackManager.invokeCallback(
+                    call.fn, call.args, 0, undefined, false, call.tag, undefined,
+                    { directThunkReturn: { returnAddr, postEsp, entryEsp, cancel,
+                        complete: (ret: number): number | null => {
+                            if (finished || !isLive()) { cancel(); return null; }
+                            const result = advance(ret);
+                            return isLive() ? result : null;
+                        } } },
+                );
+            } catch (e) {
+                Logger.warn(LogCategory.SYSTEM, `${tag}: callback dispatch failed: ${e}`);
+                input = E_FAIL;
+                continue;
+            }
             if (invoked.callbackId === 0) {
                 input = E_FAIL;
                 continue;

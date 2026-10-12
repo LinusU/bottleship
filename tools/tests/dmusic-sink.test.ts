@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Mem } from "../../src/worker/core/memory/mem-accessor";
 import type { Process } from "../../src/worker/core/process";
-import { DirectSoundSink, sinkBufferBytes } from "../../src/worker/modules/dmusic-sink";
+import { createSinkBuffer, DirectSoundSink, sinkBufferBytes } from "../../src/worker/modules/dmusic-sink";
 
 const RATE = 22050;
 const BLOCK = 4;                       // stereo 16-bit
@@ -72,6 +72,46 @@ beforeEach(() => {
 });
 
 describe("DirectSoundSink", () => {
+    test("a render failure unlocks the buffer and the next pump can retry", () => {
+        const unlock = exports.idirectsoundbuffer8_unlock!;
+        let unlocked = 0;
+        exports.idirectsoundbuffer8_unlock = () => { unlocked++; return 0; };
+        try {
+            const sink = new DirectSoundSink(process, BUFFER, 2, RATE);
+            sink.start();
+            expect(() => sink.pump(() => { throw new Error("render failed"); })).toThrow("render failed");
+            expect(unlocked).toBe(1);
+            sink.pump(counter().render);
+            expect(unlocked).toBe(2);
+            sink.release();
+        } finally { exports.idirectsoundbuffer8_unlock = unlock; }
+    });
+
+    test("buffer creation reacquires memory after both allocations and releases its private device", () => {
+        let current = new Uint8Array(128), released = 0, freed = 0;
+        const grow = () => {
+            const old = current;
+            current = new Uint8Array(Math.max(4096, old.length * 2)); current.set(old);
+            structuredClone(old.buffer, {transfer: [old.buffer]});
+        };
+        Mem.bind(() => current);
+        const dsExports = {
+            directsoundcreate: (_c: unknown, m: Uint8Array, a: number[]) => {
+                expect(m).toBe(current); grow(); Mem.writeUint32(a[1]!, 0x700); return 0;
+            },
+            idirectsound8_createsoundbuffer: (_c: unknown, m: Uint8Array, a: number[]) => {
+                expect(m).toBe(current);
+                expect(Mem.readUint32(a[1]!)).toBe(36);
+                Mem.writeUint32(a[2]!, 0x710); return 0;
+            },
+            IDirectSound8_Release: () => { released++; return 0; },
+        };
+        const model = {getModule: () => ({exports: dsExports}), memory: {
+            alloc: () => { grow(); return 0x100; }, free: () => { freed++; },
+        }} as unknown as Process;
+        expect(createSinkBuffer(model, 0, 2, RATE)).toBe(0x710);
+        expect(released).toBe(1); expect(freed).toBe(1);
+    });
     test("starts the buffer looping and reads its size", () => {
         const sink = new DirectSoundSink(process, BUFFER, 2, RATE);
         expect(sink.start()).toBe(true);

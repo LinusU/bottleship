@@ -35,7 +35,7 @@ GOG extraction does not establish gameplay coverage for that installer edition.
 | Need for Speed: Porsche Unleashed | playable\* | |
 | Need for Speed: Underground | playable | |
 | Need for Speed: Underground 2 | playable | |
-| Midtown Madness 2 | playable† | |
+| Midtown Madness 2 (full game) | runtime imported; gameplay unverified† | |
 | Carmageddon 2: Carpocalypse Now | playable | ✓ |
 | Star Wars Episode I: Racer | playable | ✓ |
 | Unreal Gold | playable | |
@@ -82,16 +82,13 @@ GOG extraction does not establish gameplay coverage for that installer edition.
 
 \* retail has an intermittent mode-switch hiccup; the demo does not.
 
-† Midtown Madness 2 covers the full game: the logo movie, San Francisco and London, Cruise,
-Blitz and Circuit races with opponents, a Crash Course lesson, the DirectMusic score, and a
-clean exit to Windows. The score is the game's own choice to make: *Play Music* under
-Options → Audio is off on a new profile, as it is on Windows, and only the city ambience
-plays until it is switched on. A few parts use the General MIDI drum kit from Windows' `gm.dls`, which
-BottleShip does not ship; they are silent unless the bundle carries that file at
-`C:\WINDOWS\SYSTEM32\DRIVERS\GM.DLS`. The disc executable is wrapped in SafeDisc, which is
-not emulated: the bundle needs a `Midtown2.exe` without the wrapper. Pack the installed
-directory as it is with `Midtown2.exe` as the entry point. A race against seven opponents
-runs at roughly a third of Cruise's frame rate. Multiplayer is unverified.
+† The MCIWnd and DirectMusic runtime was imported from LinusU's full-game branch,
+with targeted stack, stream, lifetime and parser regressions. The October 12 integration
+does not include a game run; full-game playability and audio/video fidelity have not been
+independently accepted. Use a lawfully obtained installed game for any future test.
+BottleShip does not implement SafeDisc or ship the game, movies or Windows gm.dls.
+Instruments that reference the default GM collection remain silent when that collection
+is absent. The trial's earlier gameplay verification does not validate the full game.
 
 The working collection also covers full builds alongside the production demos of Re-Volt,
 Heroes III, StarCraft, Diablo II, Max Payne, Harry Potter 1, NFS Porsche and NFS Underground.

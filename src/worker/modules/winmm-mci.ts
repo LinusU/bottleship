@@ -205,15 +205,25 @@ function parseMciTimeString(format: number, text: string): number | null {
 
 /** Frame size from an AVI's main header (`avih`), which is what MCIAVI answers `where` from. */
 export function aviFrameSize(bytes: Uint8Array): { width: number; height: number } | null {
-    if (bytes.length < 12 || String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) !== "RIFF") return null;
+    const tag = (o: number): string => String.fromCharCode(bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]);
+    if (bytes.length < 12 || tag(0) !== "RIFF" || tag(8) !== "AVI ") return null;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const limit = Math.min(bytes.length, 64 * 1024);
-    for (let o = 12; o + 8 <= limit;) {
-        const id = String.fromCharCode(bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]);
+    const end = 8 + view.getUint32(4, true);
+    if (end < 12 || end > bytes.length) return null;
+    for (let o = 12; o + 8 <= end;) {
         const size = view.getUint32(o + 4, true);
-        if (id === "LIST") { o += 12; continue; }   // descend: avih sits inside LIST hdrl
-        if (id === "avih" && size >= 40 && o + 48 <= bytes.length) {
-            return { width: view.getUint32(o + 8 + 32, true), height: view.getUint32(o + 8 + 36, true) };
+        const chunkEnd = o + 8 + size;
+        if (chunkEnd > end) return null;
+        if (tag(o) === "LIST" && size >= 4 && tag(o + 8) === "hdrl") {
+            for (let h = o + 12; h + 8 <= chunkEnd;) {
+                const headerSize = view.getUint32(h + 4, true);
+                if (h + 8 + headerSize > chunkEnd) return null;
+                if (tag(h) === "avih" && headerSize >= 40) {
+                    const width = view.getUint32(h + 40, true), height = view.getUint32(h + 44, true);
+                    return width && height ? { width, height } : null;
+                }
+                h += 8 + headerSize + (headerSize & 1);
+            }
         }
         o += 8 + size + (size & 1);
     }
@@ -1543,6 +1553,9 @@ export class WinmmMci {
             if (!device) return MCIERR_INVALID_DEVICE_NAME;
             if (!this.isMciVideoDevice(device)) return MCIERR_UNSUPPORTED_FUNCTION;
             const which = tokens.slice(2).map((t) => t.toLowerCase());
+            if (which.length !== 1 || (which[0] !== "source" && which[0] !== "destination")) {
+                return MCIERR_UNSUPPORTED_FUNCTION;
+            }
             if (which.includes("destination") && device.windowRect) {
                 const r = device.windowRect;
                 emit(`${r.x} ${r.y} ${r.w} ${r.h}`);

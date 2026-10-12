@@ -5,9 +5,11 @@
  */
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { System } from "../../src/worker/core/system";
+import {Mem} from "../../src/worker/core/memory/mem-accessor";
+import {Msvfw32} from "../../src/worker/modules/msvfw32";
 import { windows, type WindowInfo } from "../../src/worker/modules/user32/shared-state";
 import {
-    MCIWND_CLASS_NAME, clearMciWndState, handleMciWndMessage, openMciWndFile,
+    MCIWND_CLASS_NAME, clearMciWndState, handleMciWndMessage, openMciWndFile, readMciWndFileName, resetMciWndState,
 } from "../../src/worker/modules/msvfw32-mciwnd";
 
 const WS_CHILD = 0x40000000;
@@ -69,6 +71,25 @@ function makeWindow(style: number): void {
 }
 
 describe("MCIWnd", () => {
+    test("MCIWndCreate publishes its class name through a fresh view after memory growth", () => {
+        let current = new Uint8Array(128), freed = 0;
+        Mem.bind(() => current);
+        const model = {
+            memory: {alloc: () => {
+                const old = current; current = new Uint8Array(2048); current.set(old);
+                structuredClone(old.buffer, {transfer: [old.buffer]}); return 0x200;
+            }, free: () => { freed++; }},
+            getModule: () => ({exports: {CreateWindowExA: (_c: unknown, m: Uint8Array, a: number[]) => {
+                expect(m).toBe(current);
+                expect(new TextDecoder().decode(m.subarray(a[1], a[1]! + MCIWND_CLASS_NAME.length))).toBe(MCIWND_CLASS_NAME);
+                return HWND;
+            }}}),
+        };
+        system.process = model;
+        const module = new Msvfw32(); module.initialize(model as any);
+        expect(module.exports.MCIWndCreate!({} as never, current, [0, 0, 0, 0])).toBe(HWND);
+        module.reset(); expect(freed).toBe(1);
+    });
     test("opening a file aims the device at the window, sized around the movie", () => {
         makeWindow(WS_CHILD | WS_BORDER);
         expect(openMciWndFile(ctx, mem, HWND, "logos.avi")).toBe(0);
@@ -107,6 +128,8 @@ describe("MCIWnd", () => {
         makeWindow(WS_CHILD);
         openError = 275;
         expect(openMciWndFile(ctx, mem, HWND, "missing.avi")).toBe(275);
+        expect(handleMciWndMessage(ctx, HWND, 0x0400 + 128, 0, 0, mem)).toBe(275);
+        expect(handleMciWndMessage(ctx, HWND, 0x0400 + 228, 0, 0, mem)).toBe(275);
         expect(handleMciWndMessage(ctx, HWND, MCIWNDM_GETMODEA, 0, 0, mem)).toBe(MCI_MODE_NOT_READY);
         expect(handleMciWndMessage(ctx, HWND, MCI_PLAY, 0, 0, mem)).not.toBe(0);
     });
@@ -123,5 +146,30 @@ describe("MCIWnd", () => {
         makeWindow(WS_CHILD);
         windows.get(HWND)!.nativeClassName = "Button";
         expect(handleMciWndMessage(ctx, HWND, MCI_PLAY, 0, 0, mem)).toBeNull();
+    });
+
+    test("GETMODE does not partially write a buffer that overruns guest memory", () => {
+        makeWindow(WS_CHILD);
+        openMciWndFile(ctx, mem, HWND, "logos.avi");
+        mem.fill(0x5a, mem.length - 4);
+        expect(handleMciWndMessage(ctx, HWND, MCIWNDM_GETMODEA, 16, mem.length - 4, mem)).toBe(0);
+        expect([...mem.subarray(mem.length - 4)]).toEqual([0x5a, 0x5a, 0x5a, 0x5a]);
+    });
+
+    test("unterminated and unreadable filenames cannot open a device", () => {
+        mem.fill(0x61, mem.length - 4);
+        expect(readMciWndFileName(mem, mem.length - 4, false)).toBeNull();
+        expect(readMciWndFileName(mem, mem.length - 1, true)).toBeNull();
+        expect(readMciWndFileName(mem, 0, false)).toBe("");
+    });
+
+    test("reset closes devices and removes state before a window handle is reused", () => {
+        makeWindow(WS_CHILD);
+        openMciWndFile(ctx, mem, HWND, "logos.avi");
+        resetMciWndState();
+        expect(commands.filter((c) => c.startsWith("close"))).toEqual([`close mciwnd${HWND}`]);
+        expect(handleMciWndMessage(ctx, HWND, MCIWNDM_GETMODEA, 0, 0, mem)).toBe(MCI_MODE_NOT_READY);
+        resetMciWndState();
+        expect(commands.filter((c) => c.startsWith("close"))).toHaveLength(1);
     });
 });

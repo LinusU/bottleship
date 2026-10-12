@@ -19,7 +19,9 @@ import { decodePng } from "../../png-diff";
 const wgb = process.env.WGB;
 if (!wgb) throw new Error("WGB must point to the repacked Midtown Madness 2 bundle");
 /** The bundle's gameId as an OPFS container name. */
-const CONTAINER = process.env.CONTAINER ?? "app-midtown-madness-2";
+// Run in a dedicated disposable origin/profile, with a lawfully obtained game and any
+// licence handled by its owner. The scenario never erases saves or accepts agreements.
+if (!process.env.BS_TAB) throw new Error("BS_TAB must identify a dedicated regression tab");
 const out = resolve("logs", process.env.BS_TAB ?? "midtown-madness-2", "midtown-madness-2");
 mkdirSync(out, { recursive: true });
 
@@ -110,13 +112,7 @@ async function masterPeak(): Promise<number> {
 }
 
 try {
-    // The pause lets the torn-down worker's debounced OPFS flush finish before its files go.
-    await step("boot", harness().reload().sleep(1500).containerDelete(CONTAINER).openWgb(wgb).sleep(8000));
-    const licence = await harness().click("Accept").run();
-    if (!licence.ok) {
-        throw new Error(`the first-run licence dialog did not appear, so container '${CONTAINER}' was not wiped ` +
-            `(set CONTAINER if the bundle's gameId differs): ${JSON.stringify(licence.error)}`);
-    }
+    await step("boot", harness().reload().sleep(1500).openWgb(wgb).sleep(8000));
 
     // The logo movie: 320x240 in the middle of the 640x480 screen, nothing around it.
     await step("movie", harness().call("audioSignal", { reset: true }).sleep(4000));
@@ -190,5 +186,7 @@ try {
         `("${menuPattern}", peak ${menuPeak / 1000}), then a London Circuit race (motion ${motion.toFixed(1)}) ` +
         `to "${racePattern}"; evidence: ${out}`);
 } finally {
-    closeHarnessConnection();
+    try {
+        await harness().key(VK_UP, { down: false, up: true }).perfProfile({ enable: false }).pause().run();
+    } finally { closeHarnessConnection(); }
 }

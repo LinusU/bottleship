@@ -11,7 +11,8 @@ import { Process } from "../core/process";
 import { ThunkImplementation } from "../core/thunking/thunk-dispatcher";
 import { Logger, LogCategory } from "../core/logger";
 import { Marshaler } from "../core/memory/marshaler";
-import { MCIWND_CLASS_NAME, createMciWnd, ensureMciWndClass } from "./msvfw32-mciwnd";
+import { Mem } from "../core/memory/mem-accessor";
+import { MCIWND_CLASS_NAME, createMciWnd, ensureMciWndClass, readMciWndFileName, resetMciWndState } from "./msvfw32-mciwnd";
 
 /** Fake HDRAWDIB handle — just a non-zero sentinel */
 let nextDrawDibHandle = 0xDD000001;
@@ -47,9 +48,12 @@ export class Msvfw32 implements IModule {
 
         // MCIWndCreate(hwndParent, hInstance, dwStyle, szFile) → HWND
         const mciWndCreate = (wide: boolean): ThunkImplementation => (ctx, mem, args) => {
-            const file = !args[3] ? ""
-                : wide ? Marshaler.readWideString(mem, args[3]) : Marshaler.readString(mem, args[3]);
-            return createMciWnd(ctx, mem, args[0] >>> 0, args[1] >>> 0, args[2] >>> 0, file, this.mciWndClassName(mem));
+            const file = readMciWndFileName(mem, args[3] >>> 0, wide);
+            if (file === null) return 0;
+            const className = this.mciWndClassName();
+            const fresh = Mem.getView();
+            return className && fresh
+                ? createMciWnd(ctx, fresh, args[0] >>> 0, args[1] >>> 0, args[2] >>> 0, file, className) : 0;
         };
         this.exports["MCIWndCreate"] = mciWndCreate(false);
         this.exports["MCIWndCreateA"] = mciWndCreate(false);
@@ -112,15 +116,22 @@ export class Msvfw32 implements IModule {
     }
 
     /** The class name as a guest string, which is how CreateWindowEx takes it. */
-    private mciWndClassName(mem: Uint8Array): number {
+    private mciWndClassName(): number {
         if (!this.mciWndClassNamePtr) {
-            this.mciWndClassNamePtr = this.process.memory.alloc(MCIWND_CLASS_NAME.length + 1, "HEAP", "rw");
-            Marshaler.writeString(mem, this.mciWndClassNamePtr, MCIWND_CLASS_NAME);
+            const ptr = this.process.memory.alloc(MCIWND_CLASS_NAME.length + 1, "HEAP", "rw");
+            if (!ptr) return 0;
+            if (!Mem.writeBytes(ptr, new TextEncoder().encode(MCIWND_CLASS_NAME + "\0"))) {
+                this.process.memory.free(ptr);
+                return 0;
+            }
+            this.mciWndClassNamePtr = ptr;
         }
         return this.mciWndClassNamePtr;
     }
 
     reset(): void {
+        resetMciWndState();
+        if (this.mciWndClassNamePtr) this.process.memory.free(this.mciWndClassNamePtr);
         this.mciWndClassNamePtr = 0;
     }
 }

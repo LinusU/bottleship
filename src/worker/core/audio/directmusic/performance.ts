@@ -471,7 +471,9 @@ export class Performance {
         s.fresh = false;
 
         // A fresh position takes the item in force there; after that, items as they come.
-        for (const item of due(seg.tempos, a, b, fresh)) if (item.tempo > 0) this.tempo = item.tempo;
+        for (const item of due(seg.tempos, a, b, fresh)) {
+            if (Number.isFinite(item.tempo) && item.tempo >= 1 && item.tempo <= 1000) this.tempo = item.tempo;
+        }
         for (const item of due(seg.bands, a, b, fresh)) this.applyBand(item.band);
 
         if (seg.fixedPattern || seg.styles.length > 0) this.playPatterns(s, a, b, fresh);

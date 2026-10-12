@@ -9,6 +9,7 @@
 
 import { Logger, LogCategory } from "../core/logger";
 import { Marshaler } from "../core/memory/marshaler";
+import { isValidAddress } from "../core/memory/address-guard";
 import { System } from "../core/system";
 import type { ThunkResult, X86Context } from "../core/thunking/thunk-dispatcher";
 import { registerBuiltinClass } from "./user32/class";
@@ -27,9 +28,11 @@ const MCI_RESUME = 0x0855;
 
 const MCIWNDM_GETDEVICEID = WM_USER + 100;
 const MCIWNDM_GETMODEA = WM_USER + 106;
+const MCIWNDM_GETERRORA = WM_USER + 128;
 const MCIWNDM_GETSTYLES = WM_USER + 136;
 const MCIWNDM_OPENA = WM_USER + 153;
 const MCIWNDM_GETMODEW = WM_USER + 206;
+const MCIWNDM_GETERRORW = WM_USER + 228;
 const MCIWNDM_OPENW = WM_USER + 252;
 
 const MCIWNDF_NOAUTOSIZEWINDOW = 0x0001;
@@ -40,6 +43,7 @@ const MCI_MODE_PLAY = 526;
 const MCI_MODE_PAUSE = 529;
 
 const MCIERR_INVALID_DEVICE_ID = 257;
+const MCIERR_NULL_PARAMETER_BLOCK = 286;
 
 const SWP_NOMOVE = 0x0002;
 const SWP_NOZORDER = 0x0004;
@@ -52,6 +56,20 @@ interface MciWndState {
 }
 
 const states = new Map<number, MciWndState>();
+
+export function readMciWndFileName(mem: Uint8Array, ptr: number, wide: boolean): string | null {
+    if (!ptr) return "";
+    const width = wide ? 2 : 1;
+    const view = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
+    for (let i = 0; i < 32768; i++) {
+        const at = ptr + i * width;
+        if (at + width > mem.length || !isValidAddress(mem, at, width, "r")) return null;
+        if ((wide ? view.getUint16(at, true) : mem[at]) === 0) {
+            return wide ? Marshaler.readWideString(mem, ptr) : Marshaler.readString(mem, ptr);
+        }
+    }
+    return null;
+}
 
 export function ensureMciWndClass(): void {
     registerBuiltinClass(MCIWND_CLASS_NAME, {
@@ -154,9 +172,10 @@ export function handleMciWndMessage(
 
     switch (msg) {
         case MCIWNDM_OPENA:
-            return openMciWndFile(ctx, mem, hwnd, lParam ? Marshaler.readString(mem, lParam) : "");
-        case MCIWNDM_OPENW:
-            return openMciWndFile(ctx, mem, hwnd, lParam ? Marshaler.readWideString(mem, lParam) : "");
+        case MCIWNDM_OPENW: {
+            const file = readMciWndFileName(mem, lParam >>> 0, msg === MCIWNDM_OPENW);
+            return file === null ? MCIERR_NULL_PARAMETER_BLOCK : openMciWndFile(ctx, mem, hwnd, file);
+        }
         case MCI_PLAY: return command("play");
         case MCI_STOP: return command("stop");
         case MCI_PAUSE: return command("pause");
@@ -168,10 +187,19 @@ export function handleMciWndMessage(
             return st?.alias && device ? device.deviceIdOf(st.alias) : 0;
         case MCIWNDM_GETSTYLES:
             return (windows.get(hwnd)?.style ?? 0) & 0xFFFF;
+        case MCIWNDM_GETERRORA:
+        case MCIWNDM_GETERRORW:
+            return st?.lastError ?? 0;
         case MCIWNDM_GETMODEA:
         case MCIWNDM_GETMODEW: {
             const mode = deviceMode(st);
             if (lParam && wParam > 0) {
+                const width = msg === MCIWNDM_GETMODEW ? 2 : 1;
+                const size = Math.min(wParam >>> 0, mode.text.length + 1) * width;
+                if ((lParam >>> 0) + size > mem.length || !isValidAddress(mem, lParam >>> 0, size, "rw")) {
+                    if (st) st.lastError = MCIERR_NULL_PARAMETER_BLOCK;
+                    return 0;
+                }
                 if (msg === MCIWNDM_GETMODEW) Marshaler.writeWideString(mem, lParam, mode.text, wParam);
                 else Marshaler.writeString(mem, lParam, mode.text, wParam);
             }
@@ -186,6 +214,11 @@ export function clearMciWndState(hwnd: number): void {
     if (!states.has(hwnd)) return;
     closeDevice(hwnd);
     states.delete(hwnd);
+}
+
+export function resetMciWndState(): void {
+    for (const hwnd of states.keys()) closeDevice(hwnd);
+    states.clear();
 }
 
 /**

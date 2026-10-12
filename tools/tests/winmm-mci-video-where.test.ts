@@ -34,12 +34,29 @@ describe("aviFrameSize", () => {
         shifted.set(head.subarray(0, 12), 0);
         shifted.set([0x4a, 0x55, 0x4e, 0x4b, 8, 0, 0, 0], 12);   // 'JUNK', 8 bytes
         shifted.set(head.subarray(12), 28);
+        new DataView(shifted.buffer).setUint32(4, shifted.length - 8, true);
         expect(aviFrameSize(shifted)).toEqual({ width: 640, height: 272 });
     });
 
     test("anything that is not an AVI answers null instead of a size", () => {
         expect(aviFrameSize(new Uint8Array(64))).toBeNull();
         expect(aviFrameSize(aviHeader(320, 240).subarray(0, 40))).toBeNull();
+    });
+
+    test("rejects another RIFF form, oversized chunks and headers outside their LIST", () => {
+        const wave = aviHeader(320, 240);
+        wave.set(new TextEncoder().encode("WAVE"), 8);
+        expect(aviFrameSize(wave)).toBeNull();
+        const shortList = aviHeader(320, 240);
+        new DataView(shortList.buffer).setUint32(16, 4, true);
+        expect(aviFrameSize(shortList)).toBeNull();
+        const oversized = aviHeader(320, 240);
+        new DataView(oversized.buffer).setUint32(28, 0xffffffff, true);
+        expect(aviFrameSize(oversized)).toBeNull();
+        const shortRiff = aviHeader(320, 240);
+        new DataView(shortRiff.buffer).setUint32(4, 16, true);
+        expect(aviFrameSize(shortRiff)).toBeNull();
+        expect(aviFrameSize(aviHeader(0, 240))).toBeNull();
     });
 });
 

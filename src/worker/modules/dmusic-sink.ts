@@ -20,6 +20,16 @@ const NO_CONTEXT = { eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi
 /** Renders `frames` of interleaved 16-bit PCM into `out`. */
 export type RenderPcm = (out: Int16Array, frames: number) => void;
 
+export function soundReference(process: Process, ptr: number, buffer: boolean, retain: boolean): void {
+    if (!ptr) return;
+    const iface = buffer ? "IDirectSoundBuffer8" : "IDirectSound8";
+    const method = retain ? "AddRef" : "Release";
+    const exports = process.getModule("dsound")?.exports;
+    const fn = exports?.[`${iface}_${method}`] ?? exports?.[`${iface}_${method}`.toLowerCase()];
+    const mem = Mem.getView();
+    if (fn && mem) fn(NO_CONTEXT, mem, [ptr]);
+}
+
 export class DirectSoundSink {
     private readonly process: Process;
     private readonly buffer: number;
@@ -52,6 +62,7 @@ export class DirectSoundSink {
     start(): boolean {
         if (this.playing) return true;
         if (!this.scratch) this.scratch = this.process.memory.alloc(32, "HEAP", "rw");
+        if (!this.scratch) return false;
         // DSBCAPS: dwSize, dwFlags, dwBufferBytes, …
         Mem.writeUint32(this.scratch, 20);
         if (this.call("getcaps", [this.scratch]) !== 0) {
@@ -109,11 +120,14 @@ export class DirectSoundSink {
         const frames = Math.floor((len1 + len2) / this.blockAlign);
         const samples = frames * (this.blockAlign >> 1);
         if (this.pcm.length < samples) this.pcm = new Int16Array(samples);
-        render(this.pcm, frames);
-        const bytes = new Uint8Array(this.pcm.buffer, 0, samples * 2);
-        if (ptr1 && len1) Mem.writeBytes(ptr1, bytes.subarray(0, len1));
-        if (ptr2 && len2) Mem.writeBytes(ptr2, bytes.subarray(len1, len1 + len2));
-        this.call("unlock", [ptr1, len1, ptr2, len2]);
+        try {
+            render(this.pcm, frames);
+            const bytes = new Uint8Array(this.pcm.buffer, 0, samples * 2);
+            if (ptr1 && len1) Mem.writeBytes(ptr1, bytes.subarray(0, len1));
+            if (ptr2 && len2) Mem.writeBytes(ptr2, bytes.subarray(len1, len1 + len2));
+        } finally {
+            this.call("unlock", [ptr1, len1, ptr2, len2]);
+        }
         this.writeOffset = (this.writeOffset + len1 + len2) % size;
     }
 }
@@ -134,13 +148,17 @@ export function createSinkBuffer(process: Process, directSound: number, channels
     const DSBUFFERDESC_SIZE = 36;
 
     const scratch = process.memory.alloc(DSBUFFERDESC_SIZE + 18 + 8, "HEAP", "rw");
+    if (!scratch) return 0;
+    let createdDevice = 0;
     try {
         let ds = directSound >>> 0;
         if (!ds) {
             const create = dsound.exports["directsoundcreate"] as ThunkImplementation | undefined;
-            if (!create || create(NO_CONTEXT, mem, [0, scratch, 0]) !== 0) return 0;
+            const fresh = Mem.getView();
+            if (!create || !fresh || create(NO_CONTEXT, fresh, [0, scratch, 0]) !== 0) return 0;
             ds = Mem.readUint32(scratch) ?? 0;
             if (!ds) return 0;
+            createdDevice = ds;
         }
         const format = scratch + DSBUFFERDESC_SIZE;
         const out = format + 18;
@@ -151,9 +169,11 @@ export function createSinkBuffer(process: Process, directSound: number, channels
         Mem.writeUint32(scratch + 16, format);
         writeWaveFormat(format, channels, sampleRate);
         const createBuffer = dsound.exports["idirectsound8_createsoundbuffer"] as ThunkImplementation | undefined;
-        if (!createBuffer || createBuffer(NO_CONTEXT, mem, [ds, scratch, out, 0]) !== 0) return 0;
+        const fresh = Mem.getView();
+        if (!createBuffer || !fresh || createBuffer(NO_CONTEXT, fresh, [ds, scratch, out, 0]) !== 0) return 0;
         return Mem.readUint32(out) ?? 0;
     } finally {
+        soundReference(process, createdDevice, false, false);
         process.memory.free(scratch);
     }
 }

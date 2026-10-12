@@ -32,6 +32,7 @@ import { allocateComObject } from "../core/com/com-memory";
 import { InterfaceRegistry } from "../core/com/interface-registry";
 import { Logger, LogCategory } from "../core/logger";
 import { Mem } from "../core/memory/mem-accessor";
+import { isValidAddress } from "../core/memory/address-guard";
 import { IModule } from "../core/module";
 import { Process } from "../core/process";
 import { SystemResourceProvider } from "../core/resources/system-resource-provider";
@@ -47,7 +48,7 @@ import {
     IID_IDirectMusicCollection, IID_IDirectMusicGetLoader, IID_IDirectMusicStyle, IID_IUnknown, LoadableObject,
     LoaderObject, PerformanceObject, PortObject, SegmentObject, SegmentStateObject, StyleObject, TrackObject,
 } from "./dmusic-objects";
-import { createSinkBuffer, DirectSoundSink, sinkBufferBytes, writeWaveFormat } from "./dmusic-sink";
+import { createSinkBuffer, DirectSoundSink, sinkBufferBytes, soundReference, writeWaveFormat } from "./dmusic-sink";
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -114,6 +115,11 @@ const DEFAULT_COLLECTION_PATHS = ["C:\\WINDOWS\\SYSTEM32\\DRIVERS\\GM.DLS", "C:\
 /** The most a loadable object reads from its stream. */
 const MAX_OBJECT_BYTES = 64 * 1024 * 1024;
 
+function validPointer(ptr: number, size: number, perms: "r" | "w" | "rw"): boolean {
+    const mem = Mem.getView();
+    return !!ptr && !!mem && ptr + size <= mem.length && isValidAddress(mem, ptr, size, perms === "w" ? "rw" : perms);
+}
+
 function guidAt(address: number): string {
     const b = Mem.readBytes(address, 16);
     if (!b) return "";
@@ -158,6 +164,8 @@ export class DMusic implements IModule {
     vtables: Record<string, VTableInfo> = {};
     private process!: Process;
     private readonly ports = new Set<PortObject>();
+    private readonly performances = new Set<PerformanceObject>();
+    private readonly loading = new Set<LoadableObject>();
     private pumpTimer: number | null = null;
     private mixLeft = new Float32Array(0);
     private mixRight = new Float32Array(0);
@@ -191,7 +199,18 @@ export class DMusic implements IModule {
 
     reset(): void {
         this.stopPump();
+        for (const perf of this.performances) this.closePerformance(perf);
+        for (const port of this.ports) {
+            this.activatePort(port, false);
+            this.releasePortOutput(port);
+        }
+        for (const [ptr, state] of this.messages) {
+            state?.release();
+            this.process.memory.free(ptr);
+        }
         this.ports.clear();
+        this.performances.clear();
+        this.loading.clear();
         this.messages.clear();
     }
 
@@ -203,7 +222,8 @@ export class DMusic implements IModule {
 
     private object<T extends DMusicObject>(thisPtr: number | undefined): T | null {
         if (!thisPtr) return null;
-        return (SystemResourceProvider.getInstance().getComObjectByAddress(thisPtr >>> 0) as T | null) ?? null;
+        const obj = SystemResourceProvider.getInstance().getComObjectByAddress(thisPtr >>> 0);
+        return obj instanceof DMusicObject ? obj as T : null;
     }
 
     /** The guest address of `obj` as `vtableName`, publishing that interface on first use. */
@@ -224,26 +244,32 @@ export class DMusic implements IModule {
 
     /** Store a newly created object's primary interface at `ppOut`; the caller owns its one reference. */
     private publish(obj: DMusicObject, ppOut: number): number {
+        if (!validPointer(ppOut, 4, "w")) { obj.release(); return E_POINTER; }
         const address = this.addressOf(obj, obj.primaryVtable);
-        if (!address) return E_FAIL;
-        return ppOut && Mem.writeUint32(ppOut, address) ? S_OK : E_POINTER;
+        if (!address || !Mem.writeUint32(ppOut, address)) {
+            obj.release();
+            return address ? E_POINTER : E_FAIL;
+        }
+        return S_OK;
     }
 
     private queryInterface(obj: DMusicObject, iid: string, ppOut: number): number {
-        if (!ppOut) return E_POINTER;
+        if (!validPointer(ppOut, 4, "w")) return E_POINTER;
         const vtableName = iid === IID_IUnknown ? obj.primaryVtable : obj.interfaces[iid];
         const address = vtableName ? this.addressOf(obj, vtableName) : 0;
         if (!address) {
             Mem.writeUint32(ppOut, 0);
             return E_NOINTERFACE;
         }
+        if (!Mem.writeUint32(ppOut, address)) return E_POINTER;
         obj.addRef();
-        return Mem.writeUint32(ppOut, address) ? S_OK : E_POINTER;
+        return S_OK;
     }
 
     private registerUnknownExports(iface: string): void {
         const e = this.exports;
         e[`${iface}_QueryInterface`] = (_c, _m, a) => {
+            if (!validPointer(a[1] >>> 0, 16, "r")) return E_POINTER;
             const obj = this.object(a[0]);
             if (!obj) {
                 if (a[2]) Mem.writeUint32(a[2] >>> 0, 0);
@@ -265,13 +291,19 @@ export class DMusic implements IModule {
             case CLSID_DirectMusicLoader:
             case "d2ac2891-b39b-11d1-8704-00600893b1bd":
                 obj = new LoaderObject(); break;
-            case CLSID_DirectMusicPerformance: obj = new PerformanceObject(); break;
+            case CLSID_DirectMusicPerformance: {
+                const perf = new PerformanceObject();
+                this.performances.add(perf);
+                perf.onDestroy = () => { this.closePerformance(perf); this.performances.delete(perf); };
+                obj = perf;
+                break;
+            }
             case CLSID_DirectMusicComposer: obj = new ComposerObject(); break;
             case CLSID_DirectMusicSegment: obj = new SegmentObject(); break;
             case CLSID_DirectMusicStyle: obj = new StyleObject(); break;
             case CLSID_DirectMusicBand: obj = new BandObject(); break;
             case CLSID_DirectMusicCollection: obj = new CollectionObject(); break;
-            case CLSID_DirectMusic: obj = new DirectMusicObject(); break;
+            case CLSID_DirectMusic: obj = this.createDirectMusic(); break;
             default: return null;
         }
         const hr = this.queryInterface(obj, iid, ppOut);
@@ -297,11 +329,14 @@ export class DMusic implements IModule {
     private *readStream(stream: number): Generator<GuestCall, Uint8Array | null, number> {
         const memory = this.process.memory;
         const head = memory.alloc(16, "HEAP", "rw");
+        if (!head) return null;
         let body = 0;
         try {
+            Mem.writeUint32(head + 12, 0);
             let hr = yield this.vcall(stream, 3, [head, 12, head + 12], "IStream::Read");
             const tag = Mem.readBytes(head, 12);
-            if ((hr | 0) < 0 || !tag || String.fromCharCode(tag[0]!, tag[1]!, tag[2]!, tag[3]!) !== "RIFF") return null;
+            if ((hr | 0) < 0 || Mem.readUint32(head + 12) !== 12 || !tag
+                || String.fromCharCode(tag[0]!, tag[1]!, tag[2]!, tag[3]!) !== "RIFF") return null;
             const header = tag.slice();
             const size = Mem.readUint32(head + 4) ?? 0;
             if (size < 4 || size > MAX_OBJECT_BYTES) return null;
@@ -310,8 +345,10 @@ export class DMusic implements IModule {
             out.set(header);
             if (rest > 0) {
                 body = memory.alloc(rest, "HEAP", "rw");
+                if (!body) return null;
+                Mem.writeUint32(head + 12, 0);
                 hr = yield this.vcall(stream, 3, [body, rest, head + 12], "IStream::Read");
-                const data = (hr | 0) < 0 ? null : Mem.readBytes(body, rest);
+                const data = (hr | 0) < 0 || Mem.readUint32(head + 12) !== rest ? null : Mem.readBytes(body, rest);
                 if (!data) return null;
                 out.set(data, 12);
             }
@@ -325,15 +362,16 @@ export class DMusic implements IModule {
     /**
      * Resolve `refs` through the loader behind `stream`. Each distinct object is asked for
      * once; the result is our own object for it, or null when the loader has none. The
-     * caller receives one reference on each distinct object in the result.
+     * owner retains each distinct object before another guest call can re-enter us.
      */
     private *resolveReferences(
-        stream: number, refs: ObjectReference[], iid: string,
+        stream: number, refs: ObjectReference[], iid: string, owner: LoadableObject,
     ): Generator<GuestCall, Map<ObjectReference, DMusicObject | null>, number> {
         const resolved = new Map<ObjectReference, DMusicObject | null>();
         if (refs.length === 0) return resolved;
         const memory = this.process.memory;
         const scratch = memory.alloc(DESC.size + 16 + 8, "HEAP", "rw");
+        if (!scratch) return resolved;
         const iidPtr = scratch + DESC.size;
         const out = iidPtr + 16;
         let getLoader = 0;
@@ -361,11 +399,18 @@ export class DMusic implements IModule {
                 Mem.writeUint32(out, 0);
                 hr = yield this.vcall(loader, 3, [scratch, iidPtr, out], `IDirectMusicLoader::GetObject(${ref.fileName || ref.name})`);
                 const ptr = (hr | 0) < 0 ? 0 : (Mem.readUint32(out) ?? 0);
-                const obj = ptr ? this.object(ptr) : null;
+                let obj = ptr ? this.object(ptr) : null;
+                if (ptr && (!obj || !obj.interfaces[iid] || this.referenceWouldCycle(owner, obj))) {
+                    yield this.vcall(ptr, 2, [], "IDirectMusicObject::Release(rejected reference)");
+                    obj = null;
+                }
                 if (!obj) Logger.warn(LogCategory.COM, `[DMusic] reference to "${ref.fileName || ref.name}" not resolved (hr=0x${(hr >>> 0).toString(16)})`);
                 // GetObject returned a reference. The caller keeps one per object, however
                 // many of its references name that object.
-                if (obj && [...byKey.values()].includes(obj)) obj.release();
+                if (obj) {
+                    if (owner.references.includes(obj)) obj.release();
+                    else owner.references.push(obj);
+                }
                 byKey.set(key, obj);
                 resolved.set(ref, obj);
             }
@@ -396,15 +441,35 @@ export class DMusic implements IModule {
     // ── loading ─────────────────────────────────────────────────────────────────
 
     /** IPersistStream::Load for every loadable class. */
+    private referenceWouldCycle(owner: LoadableObject, target: DMusicObject): boolean {
+        const pending = [target], seen = new Set<DMusicObject>();
+        while (pending.length) {
+            const obj = pending.pop()!;
+            if (obj === owner) return true;
+            if (seen.has(obj)) continue;
+            seen.add(obj);
+            if (obj instanceof LoadableObject) pending.push(...obj.references);
+        }
+        return false;
+    }
+
     private *load(obj: LoadableObject, stream: number): GuestRoutine {
+        if (this.loading.has(obj)) return E_FAIL;
+        this.loading.add(obj);
+        obj.addRef();
+        try {
+            return yield* this.loadContents(obj, stream);
+        } finally {
+            this.loading.delete(obj);
+            if (obj.refCount > 0) obj.release();
+        }
+    }
+
+    private *loadContents(obj: LoadableObject, stream: number): GuestRoutine {
         const bytes = yield* this.readStream(stream);
         if (!bytes) return DMUS_E_LOADER_FAILEDOPEN;
-
-        // Each object takes one reference on what it refers to, and gives it back when it dies.
-        const hold = (target: DMusicObject | null): void => {
-            if (target && !obj.references.includes(target)) obj.references.push(target);
-            else target?.release();
-        };
+        obj.loaded = false;
+        for (const target of obj.references.splice(0)) target.release();
         if (!obj.onDestroy) {
             obj.onDestroy = () => { for (const target of obj.references.splice(0)) target.release(); };
         }
@@ -412,8 +477,7 @@ export class DMusic implements IModule {
 
         const bandsOf = function* (this: DMusic, bands: Band[]): Generator<GuestCall, LoadedBand[], number> {
             const refs = bands.flatMap((b) => b.instruments.map((i) => i.collection).filter((c): c is ObjectReference => !!c));
-            const found = yield* this.resolveReferences(stream, refs, IID_IDirectMusicCollection);
-            for (const target of new Set(found.values())) hold(target);
+            const found = yield* this.resolveReferences(stream, refs, IID_IDirectMusicCollection, obj);
             return bands.map((band) => loadBand(band, (ref) => {
                 const collection = (found.get(ref) as CollectionObject | null | undefined)?.collection ?? null;
                 if (!collection) partial = true;
@@ -441,8 +505,7 @@ export class DMusic implements IModule {
             obj.file = file;
             obj.identity = file.identity;
             const styleRefs = file.tracks.flatMap((t) => t.kind === "style" ? t.items.map((i) => i.style) : []);
-            const styles = yield* this.resolveReferences(stream, styleRefs, IID_IDirectMusicStyle);
-            for (const target of new Set(styles.values())) hold(target);
+            const styles = yield* this.resolveReferences(stream, styleRefs, IID_IDirectMusicStyle, obj);
             const bandItems = file.tracks.flatMap((t) => t.kind === "band" ? t.items : []);
             const bands = yield* bandsOf(bandItems.map((i) => i.band));
             const loadedByBand = new Map(bandItems.map((item, i) => [item.band, bands[i]!]));
@@ -471,7 +534,8 @@ export class DMusic implements IModule {
         e["IDirectMusicObject_GetDescriptor"] = (_c, _m, a) => {
             const obj = this.object<LoadableObject>(a[0]);
             const desc = a[1] >>> 0;
-            if (!obj || !desc) return E_POINTER;
+            if (!obj || !validPointer(desc, DESC.size, "rw")) return E_POINTER;
+            if ((Mem.readUint32(desc) ?? 0) < DESC.size) return E_INVALIDARG;
             let valid = DMUS_OBJ_CLASS;
             Mem.writeBytes(desc + DESC.guidClass, guidBytes(obj.classId));
             if (obj.identity.objectId) {
@@ -499,7 +563,8 @@ export class DMusic implements IModule {
         e["IDirectMusicObject_SetDescriptor"] = (_c, _m, a) => {
             const obj = this.object<LoadableObject>(a[0]);
             const desc = a[1] >>> 0;
-            if (!obj || !desc) return E_POINTER;
+            if (!obj || !validPointer(desc, DESC.size, "r")) return E_POINTER;
+            if ((Mem.readUint32(desc) ?? 0) < DESC.size) return E_INVALIDARG;
             const valid = Mem.readUint32(desc + DESC.validData) ?? 0;
             if (valid & DMUS_OBJ_OBJECT) obj.identity.objectId = guidAt(desc + DESC.guidObject);
             if (valid & DMUS_OBJ_NAME) obj.identity.name = readWide(desc + DESC.name, DESC_NAME_CHARS);
@@ -511,7 +576,8 @@ export class DMusic implements IModule {
             const obj = this.object<LoadableObject>(a[0]);
             const stream = a[1] >>> 0;
             const desc = a[2] >>> 0;
-            if (!obj || !stream || !desc) return E_POINTER;
+            if (!obj || !stream || !validPointer(desc, DESC.size, "rw")) return E_POINTER;
+            if ((Mem.readUint32(desc) ?? 0) < DESC.size) return E_INVALIDARG;
             const self = this;
             return runGuestRoutine(ctx, mem, (function* (): GuestRoutine {
                 const bytes = yield* self.readStream(stream);
@@ -536,8 +602,7 @@ export class DMusic implements IModule {
         e["IDirectMusicPersistStream_GetClassID"] = (_c, _m, a) => {
             const obj = this.object<LoadableObject>(a[0]);
             if (!obj || !a[1]) return E_POINTER;
-            Mem.writeBytes(a[1] >>> 0, guidBytes(obj.classId));
-            return S_OK;
+            return Mem.writeBytes(a[1] >>> 0, guidBytes(obj.classId)) ? S_OK : E_POINTER;
         };
         e["IDirectMusicPersistStream_IsDirty"] = () => S_FALSE;
         // HRESULT Load(IStream *pStm)
@@ -651,24 +716,91 @@ export class DMusic implements IModule {
         obj = new SegmentStateObject();
         obj.state = state;
         const made = obj;
-        obj.onDestroy = () => { if (perf.stateObjects.get(state) === made) perf.stateObjects.delete(state); };
+        obj.onDestroy = () => {
+            if (perf.stateObjects.get(state) === made) perf.stateObjects.delete(state);
+            obj.segment?.release();
+            obj.segment = null;
+        };
         perf.stateObjects.set(state, obj);
-        // The creation reference is dropped by whoever publishes the object first.
+        // The performance owns the creation reference until the state ends or it closes.
         return obj;
     }
 
     /** Hand a state object to the guest at `ppOut` (optional); the guest owns that reference. */
-    private publishState(perf: PerformanceObject, state: PerfSegmentState | null, segment: SegmentObject | null, ppOut: number): void {
-        if (!ppOut) return;
-        if (!state) { Mem.writeUint32(ppOut, 0); return; }
-        const existing = perf.stateObjects.get(state);
+    private publishState(perf: PerformanceObject, state: PerfSegmentState | null, segment: SegmentObject | null, ppOut: number): number {
+        if (!ppOut) return S_OK;
+        if (!validPointer(ppOut, 4, "w")) return E_POINTER;
+        if (!state) { Mem.writeUint32(ppOut, 0); return S_OK; }
         const obj = this.stateObject(perf, state);
-        if (segment) obj.segment = segment;
-        if (existing === obj) obj.addRef();
-        Mem.writeUint32(ppOut, this.addressOf(obj, obj.primaryVtable));
+        this.holdStateSegment(obj, segment);
+        const address = this.addressOf(obj, obj.primaryVtable);
+        if (!address) return E_FAIL;
+        if (!Mem.writeUint32(ppOut, address)) return E_POINTER;
+        obj.addRef();
+        return S_OK;
+    }
+
+    private holdStateSegment(obj: SegmentStateObject, segment: SegmentObject | null): void {
+        if (!segment || obj.segment === segment) return;
+        segment.addRef();
+        obj.segment?.release();
+        obj.segment = segment;
+    }
+
+    private releaseEndedStates(perf: PerformanceObject): void {
+        for (const [state, obj] of perf.stateObjects) {
+            if (!state.ended) continue;
+            perf.stateObjects.delete(state);
+            obj.release();
+        }
+    }
+
+    private detachPort(perf: PerformanceObject): void {
+        perf.engine?.stop(null, null, 0);
+        if (perf.engine) perf.engine.onNotification = null;
+        const port = perf.port;
+        perf.port = null;
+        perf.engine = null;
+        if (port?.performance === perf) {
+            port.performance = null;
+            this.activatePort(port, false);
+        }
+        port?.release();
+        this.releaseEndedStates(perf);
+    }
+
+    private closePerformance(perf: PerformanceObject): void {
+        perf.notifySegments = false;
+        this.detachPort(perf);
+        for (const n of perf.notifications.splice(0)) n.state.release();
+        for (const obj of [...perf.stateObjects.values()]) obj.release();
+        perf.stateObjects.clear();
+        perf.notificationHandle = 0;
+        perf.defaultAudioPath?.release();
+        perf.defaultAudioPath = null;
+        perf.directMusic?.release();
+        perf.directMusic = null;
+    }
+
+    private releasePortOutput(port: PortObject): void {
+        port.sink?.release();
+        port.sink = null;
+        soundReference(this.process, port.buffer, true, false);
+        port.buffer = 0;
+        port.ownsBuffer = false;
+    }
+
+    private setDirectSound(obj: DirectMusicObject | PortObject, ptr: number): void {
+        if (obj.directSound === ptr) return;
+        soundReference(this.process, ptr, false, true);
+        soundReference(this.process, obj.directSound, false, false);
+        obj.directSound = ptr;
     }
 
     private attachEngine(perf: PerformanceObject, port: PortObject): void {
+        if (perf.port === port) return;
+        this.detachPort(perf);
+        port.addRef();
         port.performance = perf;
         perf.port = port;
         const engine = new Performance(port.synth);
@@ -684,9 +816,8 @@ export class DMusic implements IModule {
         while (perf.notifications.length > 0 && now - perf.notifications[0]!.queuedAtMs > NOTIFICATION_LIFETIME_MS) {
             perf.notifications.shift()!.state.release();
         }
-        const existing = perf.stateObjects.get(state);
         const obj = this.stateObject(perf, state);
-        if (existing === obj) obj.addRef();
+        obj.addRef();
         perf.notifications.push({ type, state: obj, musicTime, queuedAtMs: now });
         if (perf.notificationHandle) System.getInstance().scheduler?.setEvent(perf.notificationHandle);
     }
@@ -697,13 +828,13 @@ export class DMusic implements IModule {
         port.audioChannels = audioChannels;
         port.voices = voices;
         port.synth = new DlsSynth(sampleRate, voices);
-        port.directSound = dm?.directSound ?? 0;
+        this.setDirectSound(port, dm?.directSound ?? 0);
         dm?.ports.add(port);
         this.ports.add(port);
         port.onDestroy = () => {
             this.activatePort(port, false);
-            port.sink?.release();
-            port.sink = null;
+            this.releasePortOutput(port);
+            this.setDirectSound(port, 0);
             this.ports.delete(port);
             dm?.ports.delete(port);
             if (port.performance?.port === port) {
@@ -712,6 +843,12 @@ export class DMusic implements IModule {
             }
         };
         return port;
+    }
+
+    private createDirectMusic(): DirectMusicObject {
+        const dm = new DirectMusicObject();
+        dm.onDestroy = () => this.setDirectSound(dm, 0);
+        return dm;
     }
 
     private registerPerformanceExports(): void {
@@ -738,14 +875,20 @@ export class DMusic implements IModule {
         const init = (thisPtr: number, ppDirectMusic: number, directSound: number): number => {
             const perf = this.object<PerformanceObject>(thisPtr);
             if (!perf) return E_POINTER;
+            if (ppDirectMusic && !validPointer(ppDirectMusic, 4, "rw")) return E_POINTER;
             const supplied = ppDirectMusic ? (Mem.readUint32(ppDirectMusic) ?? 0) : 0;
             let dm = supplied ? this.object<DirectMusicObject>(supplied) : null;
             if (!dm) {
-                dm = new DirectMusicObject();
-                if (ppDirectMusic) this.publish(dm, ppDirectMusic);
-                else this.addressOf(dm, dm.primaryVtable);
+                dm = this.createDirectMusic();
+                if (ppDirectMusic) {
+                    const hr = this.queryInterface(dm, IID_IUnknown, ppDirectMusic);
+                    if (hr !== S_OK) { dm.release(); return hr; }
+                }
+            } else {
+                dm.addRef();
             }
-            if (directSound) dm.directSound = directSound >>> 0;
+            if (directSound) this.setDirectSound(dm, directSound >>> 0);
+            perf.directMusic?.release();
             perf.directMusic = dm;
             return S_OK;
         };
@@ -760,7 +903,9 @@ export class DMusic implements IModule {
                 const port = this.createPort(perf.directMusic, 22050, 2, 64);
                 this.addressOf(port, port.primaryVtable);
                 this.attachEngine(perf, port);
-                this.activatePort(port, true);
+                const active = this.activatePort(port, true);
+                port.release();
+                if (!active) { this.detachPort(perf); return E_FAIL; }
             }
             return hr;
         };
@@ -770,31 +915,32 @@ export class DMusic implements IModule {
             const perf = perfOf(a);
             if (!perf) return E_POINTER;
             let port = a[1] ? this.object<PortObject>(a[1]) : null;
+            if (port?.performance && port.performance !== perf) return E_INVALIDARG;
+            const created = !port;
             if (!port) {
                 if (a[1]) return E_INVALIDARG;
                 port = this.createPort(perf.directMusic, 22050, 2, 32);
                 this.addressOf(port, port.primaryVtable);
-                this.activatePort(port, true);
+                if (!this.activatePort(port, true)) { port.release(); return E_FAIL; }
             }
             this.attachEngine(perf, port);
+            if (created) port.release();
             return S_OK;
         };
         e["IDirectMusicPerformance8_RemovePort"] = (_c, _m, a) => {
             const perf = perfOf(a);
             if (!perf) return E_POINTER;
-            perf.engine?.stop(null, null, 0);
-            if (perf.port) perf.port.performance = null;
-            perf.port = null;
-            perf.engine = null;
+            this.detachPort(perf);
             return S_OK;
         };
         // HRESULT PChannelInfo(DWORD dwPChannel, IDirectMusicPort **ppPort, DWORD *pdwGroup, DWORD *pdwMChannel)
         e["IDirectMusicPerformance8_PChannelInfo"] = (_c, _m, a) => {
             const perf = perfOf(a);
             if (!perf?.port) return DMUS_E_NOT_INIT;
+            for (const i of [2, 3, 4]) if (a[i] && !validPointer(a[i] >>> 0, 4, "w")) return E_POINTER;
             if (a[2]) {
-                perf.port.addRef();
-                Mem.writeUint32(a[2] >>> 0, this.addressOf(perf.port, perf.port.primaryVtable));
+                const hr = this.queryInterface(perf.port, IID_IUnknown, a[2] >>> 0);
+                if (hr !== S_OK) return hr;
             }
             if (a[3]) Mem.writeUint32(a[3] >>> 0, (a[1]! >>> 4) + 1);
             if (a[4]) Mem.writeUint32(a[4] >>> 0, a[1]! & 0xf);
@@ -811,14 +957,15 @@ export class DMusic implements IModule {
         // HRESULT PlaySegment(IDirectMusicSegment *pSegment, DWORD dwFlags, __int64 i64StartTime,
         //                     IDirectMusicSegmentState **ppSegmentState)
         const play = (perf: PerformanceObject | null, segPtr: number, flags: number, ppState: number): number => {
+            if (ppState && !validPointer(ppState, 4, "w")) return E_POINTER;
             if (ppState) Mem.writeUint32(ppState, 0);
             const seg = this.object<SegmentObject>(segPtr);
             if (!perf || !seg) return E_POINTER;
             if (!perf.engine) return DMUS_E_NOT_INIT;
             if (!seg.segment) return E_FAIL;
             const state = perf.engine.playSegment(seg.segment, flags >>> 0);
-            this.publishState(perf, state, seg, ppState);
-            return S_OK;
+            if (state) this.holdStateSegment(this.stateObject(perf, state), seg);
+            return this.publishState(perf, state, seg, ppState);
         };
         e["IDirectMusicPerformance8_PlaySegment"] = (_c, _m, a) => play(perfOf(a), a[1]!, a[2]!, a[5]! >>> 0);
         // PlaySegmentEx(pSource, pwzSegmentName, pTransition, dwFlags, i64StartTime, ppSegmentState, pFrom, pAudioPath)
@@ -832,6 +979,7 @@ export class DMusic implements IModule {
             const seg = a[1] ? this.object<SegmentObject>(a[1]) : null;
             const state = a[2] ? this.object<SegmentStateObject>(a[2]) : null;
             perf.engine?.stop(seg?.segment ?? null, state?.state ?? null, a[4]! >>> 0);
+            this.releaseEndedStates(perf);
             return S_OK;
         };
         // StopEx(pObjectToStop, i64StopTime, dwFlags): a segment, a state, or NULL for all.
@@ -842,6 +990,7 @@ export class DMusic implements IModule {
             perf.engine?.stop(
                 target instanceof SegmentObject ? target.segment : null,
                 target instanceof SegmentStateObject ? target.state : null, a[4]! >>> 0);
+            this.releaseEndedStates(perf);
             return S_OK;
         };
         // HRESULT IsPlaying(IDirectMusicSegment *pSegment, IDirectMusicSegmentState *pSegState)
@@ -859,7 +1008,8 @@ export class DMusic implements IModule {
             const ppState = a[1]! >>> 0;
             if (!perf || !ppState) return E_POINTER;
             const state = perf.engine?.primaryState() ?? null;
-            this.publishState(perf, state, null, ppState);
+            const hr = this.publishState(perf, state, null, ppState);
+            if (hr !== S_OK) return hr;
             return state ? S_OK : DMUS_E_NOT_FOUND;
         };
 
@@ -886,13 +1036,14 @@ export class DMusic implements IModule {
         e["IDirectMusicPerformance8_GetNotificationPMsg"] = (_c, _m, a) => {
             const perf = perfOf(a);
             const pp = a[1]! >>> 0;
-            if (!perf || !pp) return E_POINTER;
-            const next = perf.notifications.shift();
+            if (!perf || !validPointer(pp, 4, "w")) return E_POINTER;
+            const next = perf.notifications[0];
             if (!next) {
                 Mem.writeUint32(pp, 0);
                 return S_FALSE;
             }
             const msg = this.process.memory.alloc(NOTIFICATION_PMSG.size, "HEAP", "rw");
+            if (!msg) return E_FAIL;
             Mem.writeBytes(msg, new Uint8Array(NOTIFICATION_PMSG.size));
             Mem.writeUint32(msg, NOTIFICATION_PMSG.size);
             Mem.writeUint32(msg + NOTIFICATION_PMSG.mtTime, Math.round(next.musicTime) >>> 0);
@@ -904,18 +1055,20 @@ export class DMusic implements IModule {
             Mem.writeUint32(msg + NOTIFICATION_PMSG.option, next.type);
             this.messages.set(msg, next.state);
             Mem.writeUint32(pp, msg);
+            perf.notifications.shift();
             return S_OK;
         };
         // HRESULT AllocPMsg(ULONG cb, DMUS_PMSG **ppPMSG)
         e["IDirectMusicPerformance8_AllocPMsg"] = (_c, _m, a) => {
             const cb = a[1]! >>> 0;
             const pp = a[2]! >>> 0;
-            if (!pp) return E_POINTER;
+            if (!validPointer(pp, 4, "w")) return E_POINTER;
             if (cb < 56 || cb > 0x10000) {
                 Mem.writeUint32(pp, 0);
                 return E_INVALIDARG;
             }
             const msg = this.process.memory.alloc(cb, "HEAP", "rw");
+            if (!msg) { Mem.writeUint32(pp, 0); return E_FAIL; }
             Mem.writeBytes(msg, new Uint8Array(cb));
             Mem.writeUint32(msg, cb);
             this.messages.set(msg, null);
@@ -1018,12 +1171,7 @@ export class DMusic implements IModule {
         e["IDirectMusicPerformance8_CloseDown"] = (_c, _m, a) => {
             const perf = perfOf(a);
             if (!perf) return E_POINTER;
-            perf.engine?.stop(null, null, 0);
-            for (const n of perf.notifications.splice(0)) n.state.release();
-            perf.notificationHandle = 0;
-            if (perf.port) perf.port.performance = null;
-            perf.port = null;
-            perf.engine = null;
+            this.closePerformance(perf);
             return S_OK;
         };
 
@@ -1033,13 +1181,9 @@ export class DMusic implements IModule {
         e["IDirectMusicPerformance8_GetDefaultAudioPath"] = (_c, _m, a) => {
             const perf = perfOf(a);
             if (!perf || !a[1]) return E_POINTER;
-            if (perf.defaultAudioPath && perf.defaultAudioPath.refCount > 0) {
-                perf.defaultAudioPath.addRef();
-                Mem.writeUint32(a[1] >>> 0, this.addressOf(perf.defaultAudioPath, "IDirectMusicAudioPath"));
-                return S_OK;
-            }
-            perf.defaultAudioPath = new AudioPathObject();
-            return this.publish(perf.defaultAudioPath, a[1] >>> 0);
+            if (!validPointer(a[1] >>> 0, 4, "w")) return E_POINTER;
+            perf.defaultAudioPath ??= new AudioPathObject();
+            return this.queryInterface(perf.defaultAudioPath, IID_IUnknown, a[1] >>> 0);
         };
     }
 
@@ -1114,9 +1258,7 @@ export class DMusic implements IModule {
                     info.object = track;
                     return this.publish(track, ppTrack);
                 }
-                info.object.addRef();
-                Mem.writeUint32(ppTrack, this.addressOf(info.object, "IDirectMusicTrack"));
-                return S_OK;
+                return this.queryInterface(info.object, IID_IUnknown, ppTrack);
             }
             Mem.writeUint32(ppTrack, 0);
             return DMUS_E_NOT_FOUND;
@@ -1196,9 +1338,7 @@ export class DMusic implements IModule {
                 Mem.writeUint32(a[1] >>> 0, 0);
                 return DMUS_E_NOT_FOUND;
             }
-            seg.addRef();
-            Mem.writeUint32(a[1] >>> 0, this.addressOf(seg, seg.primaryVtable));
-            return S_OK;
+            return this.queryInterface(seg, IID_IUnknown, a[1] >>> 0);
         };
         e["IDirectMusicSegmentState8_SetTrackConfig"] = () => S_OK;
         e["IDirectMusicSegmentState8_GetObjectInPath"] = (_c, _m, a) => { Mem.writeUint32(a[7]! >>> 0, 0); return DMUS_E_NOT_FOUND; };
@@ -1372,6 +1512,7 @@ export class DMusic implements IModule {
         //     IDirectMusicSegmentState **ppTransSegState)
         e["IDirectMusicComposer8_AutoTransition"] = (_c, _m, a) => {
             const [ppTransSeg, ppToState, ppTransState] = [a[6]! >>> 0, a[7]! >>> 0, a[8]! >>> 0];
+            for (const pp of [ppTransSeg, ppToState, ppTransState]) if (pp && !validPointer(pp, 4, "w")) return E_POINTER;
             for (const pp of [ppTransSeg, ppToState, ppTransState]) if (pp) Mem.writeUint32(pp, 0);
             const perf = this.object<PerformanceObject>(a[1]!);
             if (!perf) return E_POINTER;
@@ -1406,7 +1547,9 @@ export class DMusic implements IModule {
             const dm = this.object<DirectMusicObject>(a[0]!);
             const params = a[2]! >>> 0;
             const ppPort = a[3]! >>> 0;
-            if (!dm || !ppPort) return E_POINTER;
+            if (!dm || !validPointer(ppPort, 4, "w")) return E_POINTER;
+            if (params && !validPointer(params, 32, "rw")) return E_POINTER;
+            if (params && (Mem.readUint32(params) ?? 0) < 32) return E_INVALIDARG;
             // DMUS_PORTPARAMS { dwSize, dwValidParams, dwVoices, dwChannelGroups, dwAudioChannels,
             //                   dwSampleRate, dwEffectFlags, fShare }
             const valid = params ? (Mem.readUint32(params + 4) ?? 0) : 0;
@@ -1444,7 +1587,7 @@ export class DMusic implements IModule {
         };
         e["IDirectMusic8_SetDirectSound"] = (_c, _m, a) => {
             const dm = this.object<DirectMusicObject>(a[0]!);
-            if (dm) dm.directSound = a[1]! >>> 0;
+            if (dm) this.setDirectSound(dm, a[1]! >>> 0);
             return S_OK;
         };
         e["IDirectMusic8_CreateMusicBuffer"] = (_c, _m, a) => { Mem.writeUint32(a[2]! >>> 0, 0); return E_NOTIMPL; };
@@ -1461,7 +1604,9 @@ export class DMusic implements IModule {
     /** DMUS_PORTCAPS of the software synthesizer, sized as the caller declared. */
     private writePortCaps(ptr: number): number {
         const declared = Mem.readUint32(ptr) ?? 0;
-        const size = declared >= 52 && declared <= DMUS_PORTCAPS_SIZE ? declared : DMUS_PORTCAPS_SIZE;
+        if (declared < 52 || declared > DMUS_PORTCAPS_SIZE) return E_INVALIDARG;
+        if (!validPointer(ptr, declared, "rw")) return E_POINTER;
+        const size = declared;
         const buf = new Uint8Array(size);
         const view = new DataView(buf.buffer);
         view.setUint32(0, size, true);
@@ -1471,7 +1616,7 @@ export class DMusic implements IModule {
         view.setUint32(28, DMUS_PORT_USER_MODE_SYNTH, true);
         view.setUint32(32, DMUS_PC_SYSTEMMEMORY, true);
         view.setUint32(36, 1000, true);   // dwMaxChannelGroups
-        view.setUint32(40, 1000, true);   // dwMaxVoices
+        view.setUint32(40, 256, true);    // dwMaxVoices
         view.setUint32(44, 2, true);      // dwMaxAudioChannels
         view.setUint32(48, 0, true);      // dwEffectFlags: no reverb
         for (let i = 0; i < SYNTH_DESCRIPTION.length && 52 + i * 2 + 1 < size; i++) {
@@ -1495,7 +1640,8 @@ export class DMusic implements IModule {
         e["IDirectMusicPort_GetRunningStats"] = (_c, _m, a) => {
             const port = portOf(a);
             const ptr = a[1]! >>> 0;
-            if (!port || !ptr) return E_POINTER;
+            if (!port || !validPointer(ptr, DMUS_SYNTHSTATS_SIZE, "rw")) return E_POINTER;
+            if ((Mem.readUint32(ptr) ?? 0) < DMUS_SYNTHSTATS_SIZE) return E_INVALIDARG;
             const buf = new Uint8Array(DMUS_SYNTHSTATS_SIZE);
             const view = new DataView(buf.buffer);
             view.setUint32(0, DMUS_SYNTHSTATS_SIZE, true);
@@ -1528,9 +1674,10 @@ export class DMusic implements IModule {
             if (!port) return E_POINTER;
             const wasActive = port.active;
             if (wasActive) this.activatePort(port, false);
-            port.directSound = a[1]! >>> 0;
-            port.sink?.release();
-            port.sink = null;
+            this.setDirectSound(port, a[1]! >>> 0);
+            // Take the new reference first: a caller may set the same buffer again.
+            soundReference(this.process, a[2]! >>> 0, true, true);
+            this.releasePortOutput(port);
             port.buffer = a[2]! >>> 0;
             port.ownsBuffer = false;
             if (wasActive) this.activatePort(port, true);
@@ -1542,6 +1689,9 @@ export class DMusic implements IModule {
             if (!port) return E_POINTER;
             const [format, formatSize, bufferSize] = [a[1]! >>> 0, a[2]! >>> 0, a[3]! >>> 0];
             const WAVEFORMATEX_SIZE = 18;
+            if ((formatSize && !validPointer(formatSize, 4, "rw"))
+                || (bufferSize && !validPointer(bufferSize, 4, "w"))
+                || (format && (!formatSize || !validPointer(format, WAVEFORMATEX_SIZE, "w")))) return E_POINTER;
             if (format && formatSize) {
                 if ((Mem.readUint32(formatSize) ?? 0) < WAVEFORMATEX_SIZE) return E_INVALIDARG;
                 writeWaveFormat(format, port.audioChannels, port.sampleRate);
@@ -1618,6 +1768,7 @@ export class DMusic implements IModule {
         const engine = port.performance?.engine;
         if (engine) engine.render(left, right, frames);
         else port.synth.render(left, right, 0, frames);
+        if (port.performance) this.releaseEndedStates(port.performance);
 
         const clamp = (v: number): number => v > 32767 ? 32767 : v < -32768 ? -32768 : v;
         if (port.audioChannels === 1) {
