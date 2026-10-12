@@ -6506,7 +6506,8 @@ export class D3D9Device {
                 // Same resolution as the render pass, so a partial clear lands on the very
                 // attachment the following draws render into.
                 rectScale = this.activeRenderScale();
-                const resolved = this.resolveDepthAttachment(size.w, size.h, rectScale);
+                const resolved = this.resolveDepthAttachment(size.w, size.h, rectScale,
+                    target !== null && colorSampleCount === 1);
                 if (resolved) {
                     attachment = {
                         view: resolved.view,

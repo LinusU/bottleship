@@ -1121,6 +1121,7 @@ export class Process {
      * Reset process state - clear memory, dispatcher state, and restore default environment
      */
     async reset(): Promise<void> {
+        this.dispatcher.callbackManager?.cancelDirectCalls();
         // --- Zero out memory regions ---
         const mem = this.getMemory();
         if (mem) {

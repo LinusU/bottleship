@@ -32,11 +32,12 @@ import { HarnessChain } from "./dsl";
 import { diskBundleUrl } from "../utils/bundle-url";
 import { INPUT_INDEX, KEY_BITFIELD_BASE, KEY_BITFIELD_COUNT } from "../input/sab-layout";
 import { relativeIntent } from "../input/relative-intent";
+import { storageReport } from "./storage-report";
 
 /** Verbs handled page-side (browser-only) rather than forwarded to the worker. */
 const BROWSER_ONLY = new Set([
     "openWgb", "loadPe", "audioGesture", "waitForEvent", "onModal", "dismissModal", "inputSab",
-    "report", "hostModals", "setHostModal",
+    "report", "hostModals", "setHostModal", "storageReport",
     "hostRecord", "hostRecordStop", "hostReplay",
 ]);
 
@@ -58,6 +59,7 @@ export interface HarnessFacade {
     audioGesture(): Promise<unknown>;
     /** Host-side snapshot of the published input record + touch transport state. */
     inputSab(): Promise<unknown>;
+    storageReport(opts?: { verifyChunks?: number }): Promise<unknown>;
     /** Arm the page recorder so MANUAL play is captured (the worker's recorder
      *  only sees harness-injected input). */
     hostRecord(): Promise<unknown>;
@@ -621,6 +623,7 @@ export function installHarnessFacade(worker: Worker, getInputView?: () => Int32A
         if (step.cmd === "loadPe") return loadPe(step.args[0] as string);
         if (step.cmd === "audioGesture") return audioGesture();
         if (step.cmd === "inputSab") return inputSab();
+        if (step.cmd === "storageReport") return storageReport(step.args[0] as { verifyChunks?: number } | undefined);
         if (step.cmd === "hostRecord") return hostRecord();
         if (step.cmd === "hostRecordStop") return hostRecordStop();
         if (step.cmd === "hostReplay") return hostReplay(step.args[0], step.args[1] as any);
@@ -672,6 +675,7 @@ export function installHarnessFacade(worker: Worker, getInputView?: () => Int32A
         loadPe,
         audioGesture,
         inputSab,
+        storageReport,
         hostRecord,
         hostRecordStop,
         hostReplay,

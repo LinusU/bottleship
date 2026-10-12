@@ -19,6 +19,7 @@ import { getDefDlgProcAddress, getDefWindowProcAddress } from './system-classes'
 import { tryRichEditStreamMessage } from './rich-edit-stream';
 import { eraseControlOverlayRect, repaintDialogAfterContentChange } from './dialog-paint';
 import { handleAnimateMessage } from './animate-control';
+import { handleMciWndMessage } from '../msvfw32-mciwnd';
 import { windows, buttonCheckStates, registerWindowTimerKiller, finalizeWindowDestroy, getAbsoluteWindowPosition, getWindowByHandle, isEffectivelyVisible } from './shared-state';
 import { validateWindow } from './paint-region';
 import { repaintChildControls, isButtonSystemControl, hitTestSystemControlAtClient } from './controls';
@@ -1596,6 +1597,8 @@ export function createMessageExports(): Record<string, ThunkImplementation> {
         if (targetWindow) {
             const animateResult = handleAnimateMessage(hWnd, msg, wParam, lParam, mem);
             if (animateResult !== null) return animateResult;
+            const mciWndResult = handleMciWndMessage(ctx, hWnd, msg, wParam, lParam, mem);
+            if (mciWndResult !== null) return mciWndResult;
 
             // System controls: delegate all messages to our built-in control behavior —
             // UNLESS the guest has subclassed the control (SetWindowLong GWL_WNDPROC). Once

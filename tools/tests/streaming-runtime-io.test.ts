@@ -46,6 +46,93 @@ async function disk(directory = dir(), etag = '"v1"'): Promise<{ cache: SparseWg
 }
 
 describe("stream transport", () => {
+    test("the last chunk of a multi-gigabyte archive only allocates one packed slot", async () => {
+        const directory = dir();
+        const file = await directory.getFileHandle("large.wgb.sparse", { create: true }) as unknown as FakeFileHandle;
+        const create = file.createSyncAccessHandle.bind(file);
+        file.createSyncAccessHandle = async () => {
+            const handle = await create();
+            const write = handle.write.bind(handle);
+            handle.write = (data, opts) => {
+                if (opts.at + data.length > 2 * 1024 * 1024) throw new Error("archive offset allocated a hole");
+                return write(data, opts);
+            };
+            return handle;
+        };
+        const chunkBytes = 1024 * 1024, size = 7 * 1024 * 1024 * 1024 + 123;
+        const count = Math.ceil(size / chunkBytes);
+        const residency = new Int32Array(new SharedArrayBuffer(Math.ceil(count / 32) * 4));
+        const cache = await SparseWgbCache.open({ url: "/large.wgb", size, etag: '"large"' }, chunkBytes, residency, directory);
+        expect(cache).not.toBeNull();
+        const tail = Uint8Array.from({ length: 123 }, (_, i) => i);
+        cache!.write(count - 1, tail);
+        expect(file.file.data.length).toBe(123);
+        expect(cache!.downloadedChunks).toBe(1);
+        expect(cache!.read(count - 1)).toEqual(tail);
+        await cache!.close();
+        const restored = await SparseWgbCache.open({ url: "/large.wgb", size, etag: '"large"' }, chunkBytes, residency, directory);
+        expect(restored!.read(count - 1)).toEqual(tail);
+        expect(restored!.downloadedChunks).toBe(1);
+        await restored!.close();
+    });
+
+    test("restart discards an uncommitted packed tail and rejects legacy offset layouts", async () => {
+        const directory = dir();
+        const first = await disk(directory);
+        const data = bytes();
+        first.cache.write(15, data.slice(960));
+        first.cache.write(2, data.slice(128, 192));
+        await first.cache.close();
+        const file = await directory.getFileHandle("runtime-test.wgb.sparse") as unknown as FakeFileHandle;
+        const handle = await file.createSyncAccessHandle();
+        handle.write(new Uint8Array(64), { at: 128 }); handle.close();
+        const restored = await disk(directory);
+        expect(file.file.data.length).toBe(128);
+        expect(restored.cache.downloadedChunks).toBe(2);
+        expect(restored.cache.read(15)).toEqual(data.slice(960));
+        await restored.cache.close();
+        const metadata = await directory.getFileHandle("runtime-test.wgb.bitmap") as unknown as FakeFileHandle;
+        const json = new TextEncoder().encode(JSON.stringify({ ...version, chunkBytes: 64 }));
+        const old = new Uint8Array(4 + json.length + 2);
+        new DataView(old.buffer).setUint32(0, json.length, true);
+        old.set(json, 4); old[old.length - 1] = 128;
+        metadata.file.data = old;
+        const fresh = await disk(directory);
+        expect(fresh.cache.downloadedChunks).toBe(0);
+        expect(file.file.data.length).toBe(0);
+        expect(Atomics.load(fresh.residency, 0)).toBe(0);
+        await fresh.cache.close();
+    });
+
+    test("promotion restores archive order, supports short reads and releases packed storage", async () => {
+        const directory = new FakeDirHandle("cache");
+        const get = directory.getFileHandle.bind(directory);
+        directory.getFileHandle = async (name, opts) => {
+            const handle = await get(name, opts);
+            (handle as FakeFileHandle & { move(name: string): Promise<void> }).move = async next => {
+                directory.children.delete(handle.name);
+                handle.name = next; handle.file.name = next;
+                directory.children.set(next, handle);
+            };
+            return handle;
+        };
+        const source = bytes(1024 + 23), count = Math.ceil(source.length / 64);
+        const residency = new Int32Array(new SharedArrayBuffer(4));
+        const cache = await SparseWgbCache.open({ ...version, size: source.length }, 64, residency, directory as unknown as FileSystemDirectoryHandle);
+        for (let ci = count - 1; ci >= 0; ci--) cache!.write(ci, source.slice(ci * 64, (ci + 1) * 64));
+        const packed = await directory.getFileHandle("runtime-test.wgb.sparse");
+        packed.file.shortReadLimit = 7;
+        const promotion = cache!.promote();
+        expect(await cache!.readAsync(0)).toEqual(source.slice(0, 64));
+        expect(await promotion).toBe(true);
+        expect(cache!.promoted).toBe(true);
+        expect((await directory.getFileHandle("runtime-test.wgb")).file.data).toEqual(source);
+        expect(directory.children.has("runtime-test.wgb.sparse")).toBe(false);
+        expect(directory.children.has("runtime-test.wgb.bitmap")).toBe(false);
+        for (let ci = 0; ci < count; ci++) expect(cache!.read(ci)).toEqual(source.slice(ci * 64, (ci + 1) * 64));
+        await cache!.close();
+    });
+
     test("parallel demand is bounded, coalesced and byte-exact with absolute ledgers", async () => {
         const source = new Source(bytes()); source.holding = true;
         const rt = runtime(source);

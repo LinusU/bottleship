@@ -32,6 +32,7 @@ import { registerWindowQueryExports } from './window-query';
 import { registerWindowPropExports } from './window-props';
 import { GDIContext } from '../gdi32/context';
 import { ensureAnimateControlClasses, clearAnimateState, onAnimateShowWindow, isAnimateControlWindow } from './animate-control';
+import { clearMciWndState } from '../msvfw32-mciwnd';
 import { getBuiltinSystemClass, getDefDlgProcAddress, getDefWindowProcAddress } from './system-classes';
 import {
     getSystemCursorHandle, IDC_ARROW, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
@@ -1491,6 +1492,7 @@ export function createWindowExports(): Record<string, ThunkImplementation> {
         }
 
         clearAnimateState(hWnd);
+        clearMciWndState(hWnd);
 
         // Win32: DestroyWindow SYNCHRONOUSLY sends WM_DESTROY, destroys children, then
         // WM_NCDESTROY — MFC's CWnd::OnNcDestroy (on WM_NCDESTROY) detaches the CWnd from

@@ -947,8 +947,13 @@ async function cmdSingle(cmd: string, rest: string[]): Promise<void> {
         if (/^[[{]/.test(a)) { try { return JSON.parse(a); } catch { return a; } } // {"continuous":true} etc.
         return a;
     });
-    const result = await execViaCdp([{ cmd, args, opts } as unknown as HarnessStep]);
-    console.log(JSON.stringify(result.steps?.[0]?.result ?? result, null, 2));
+    const steps: HarnessStep[] = [{ cmd, args, opts } as unknown as HarnessStep];
+    // Match the DSL's fresh-worker default; the page facade cannot reload itself.
+    if (cmd === "openWgb" && (args[1] as { reload?: boolean } | undefined)?.reload !== false) {
+        steps.unshift({ cmd: "reload", args: [] });
+    }
+    const result = await execViaCdp(steps);
+    console.log(JSON.stringify(result.named?.[cmd] ?? result, null, 2));
 }
 
 async function main(): Promise<void> {
