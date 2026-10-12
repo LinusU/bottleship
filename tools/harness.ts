@@ -14,6 +14,7 @@
  *   bun tools/harness.ts heapsample [sec] [top] [--major]   rank the worker's JS allocation sites
  *                                           (GC pressure; --major = only what full GCs reclaim)
  *   bun tools/harness.ts heapsnap [top]     worker JS heap residents by constructor (GC pause size)
+ *   bun tools/harness.ts stack 3 --after 45  attach while healthy, sample after a delayed stall
  *   bun tools/harness.ts audiocapture [sec] [out.wav]  record the final audio mix to a WAV
  *
  * Scripts import the fluent builder from here:
@@ -346,9 +347,14 @@ async function cmdWorkerEval(expr: string): Promise<void> {
 /** stack [samples] — interrupt the worker and dump its call stack. The go-to probe
  *  when the worker is WEDGED (RPC dead, frozen frame): Debugger.pause interrupts even
  *  a synchronous infinite loop; repeated frames across samples = the hot loop. */
-async function cmdStack(samplesArg?: string): Promise<void> {
+async function cmdStack(samplesArg?: string, ...rest: string[]): Promise<void> {
     const session = await ensureSession();
-    const stacks = await workerStack(session, { samples: samplesArg ? Number(samplesArg) : 3 });
+    const afterIndex = rest.indexOf("--after");
+    const delayMs = afterIndex >= 0 ? Number(rest[afterIndex + 1]) * 1000 : 0;
+    if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 60_000) {
+        throw new Error("stack --after expects seconds from 0 to 60");
+    }
+    const stacks = await workerStack(session, { samples: samplesArg ? Number(samplesArg) : 3, delayMs });
     stacks.forEach((frames, i) => {
         console.log(`--- sample ${i + 1}/${stacks.length}`);
         for (const f of frames.slice(0, 30)) {
@@ -941,8 +947,13 @@ async function cmdSingle(cmd: string, rest: string[]): Promise<void> {
         if (/^[[{]/.test(a)) { try { return JSON.parse(a); } catch { return a; } } // {"continuous":true} etc.
         return a;
     });
-    const result = await execViaCdp([{ cmd, args, opts } as unknown as HarnessStep]);
-    console.log(JSON.stringify(result.steps?.[0]?.result ?? result, null, 2));
+    const steps: HarnessStep[] = [{ cmd, args, opts } as unknown as HarnessStep];
+    // Match the DSL's fresh-worker default; the page facade cannot reload itself.
+    if (cmd === "openWgb" && (args[1] as { reload?: boolean } | undefined)?.reload !== false) {
+        steps.unshift({ cmd: "reload", args: [] });
+    }
+    const result = await execViaCdp(steps);
+    console.log(JSON.stringify(result.named?.[cmd] ?? result, null, 2));
 }
 
 async function main(): Promise<void> {
@@ -963,7 +974,7 @@ async function main(): Promise<void> {
         }
         case "eval": await cmdEval(rest.join(" ")); break;
         case "worker-eval": await cmdWorkerEval(rest.join(" ")); break;
-        case "stack": await cmdStack(rest[0]); break;
+        case "stack": await cmdStack(rest[0], ...rest.slice(1)); break;
         case "heapsample": await cmdHeapSample(...rest); break;
         case "heapsnap": await cmdHeapSnap(rest[0]); break;
         case "audiocapture": await cmdAudioCapture(rest[0], rest[1]); break;

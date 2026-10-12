@@ -20,6 +20,20 @@ silently otherwise), opens the bare emulator page, and waits until everything is
 
 In the browser console the same capability is on `window.__BS__.harness`.
 
+`BS_CHROME_PROFILE` selects the Chrome profile directory on a cold launch. Put it on
+a drive with ample free space: OPFS lives inside the profile, and browser eviction
+under disk pressure can remove saves together with cached bundles. `BS_CDP_PORT`
+selects the debug port when an isolated browser is needed. For example, in PowerShell:
+
+```powershell
+$env:BS_CHROME_PROFILE = 'G:/BottleShip/harness/hl2-profile'
+$env:BS_CDP_PORT = '9340'
+bun tools/harness.ts up
+```
+
+An already-running browser keeps its existing profile; crash inspection uses
+`BS_CHROME_PROFILE` too.
+
 ## Several games at once
 
 Bringing a game up is mostly *waiting* — a bundle is gigabytes, a boot is minutes — so the harness
@@ -90,6 +104,23 @@ far too much log output to grep. So the harness gives you structured views inste
   the stream to disk.
 - **Surfaces & textures.** Dump a specific guest surface or texture to a PNG when a screenshot
   of the composited canvas isn't enough.
+- **GDI font state.** `gdiFonts({text:'H', assert:true})` compares each DC's cached font
+  with the canonical font Canvas actually uses and reports glyph measurements and selected
+  bitmap dimensions. An unapplied lazy selection is allowed; a stale cache fails the assertion.
+- **CPU texture transfers.** Arm `textureWrites({arm:true, width:512, format:21})` before
+  loading, then read `textureWrites()` to distinguish textures that received no writes,
+  zero-filled transfers, and populated transfers. The bounded journal reports dropped events;
+  `textureWrites({arm:false})` stops collection.
+- **Save durability.** `fsDurability(path)` snapshots guest-visible bytes, flushes, then
+  compares them with the committed OPFS file while bypassing the content cache. It reports
+  the first differing offset and prefixes for files up to 16 MiB. Pause after the guest
+  finishes saving to compare stable content. `call('fsTrace', 'start', {writes:true, path:'.sav'})`
+  also records write offsets, lengths and byte prefixes; `call('fsTrace', 'stop')` reads the journal.
+- **Live string copies.** `call('memoryFind', 'menu.cfg', {start, end, context:32, limit:64})`
+  searches readable guest regions and returns each match's address, region, surrounding
+  hex bytes and ASCII. `encoding:'utf16le'` searches wide strings; `encoding:'hex'` accepts
+  a byte pattern. Use the returned addresses with `trapWrites` or `trapJsWrites` to find
+  where a correct source becomes a corrupted copy. `truncated` reports a hit limit.
 - **D3D9 draw capture.** `captureFrame({ backend: "d3d9", timeoutMs: 5000 })`
   records the next complete frame, including draws executed by the separate render worker.
   Keep the guest running while capturing. `maxVerts` and `maxIndexedVerts` control vertex
@@ -122,6 +153,43 @@ bun tools/harness.ts regress --only "quake2*"  # glob against the scenario name
 
 which prints a scenario → verdict → screenshot table; a failure always has a picture next
 to it even if the scenario itself never calls `.shot()`.
+
+## Inspecting a programmable D3D9 draw
+
+`captureFrame({backend: 'd3d9', minDraws: 300, timeoutMs: 300000})` waits for a complete
+frame meeting the draw threshold. Loading/menu frames are discarded and counted in
+`skippedFilteredFrameEnds`; the initial partial frame is discarded separately. The
+threshold selects a workload, and does not prove its correctness.
+`minRenderTargets` also requires that many distinct render attachments, allowing a busy
+single-target menu to be excluded while waiting for a scene with offscreen passes.
+
+Captures include depth/stencil/bias state, sampler addressing/filtering and the actual
+pipeline descriptor for captured programmable pairs. `shaderWgsl({handle, includeProgram:
+true})` additionally returns the parsed shader program on devices exposing instrumentation.
+
+`shaderOps()`, `shaderWgsl()` and `d3d9Census()` read the rendering twins when the
+D3D9 render worker is active; `producer: 'render'` identifies that source. A synchronous
+`report()` only sees the API front and marks its shader census incomplete. Frame captures
+include colour and separate-alpha blend operations and factors, including refused draws.
+
+`drawScrub(first, last, targetHandle, true)` excludes an inclusive interval of draws for
+one D3D9 render target. Omit the fourth argument to include that interval instead.
+`drawScrub(0, -1, 0)` restores normal drawing. `shaderOutputOverride(vsHandle, psHandle,
+'vec4<f32>(...)')` replaces one pair's final fragment colour for diagnostics;
+`shaderOutputOverride(vsHandle, psHandle, null)` restores its shader. The override refuses
+multiple render targets/depth output, and disables programmable batching while armed.
+
+`dumpTexture(handle, {from: 'auto', level: 2})` reads an authored CPU mip; `from: 'gpu'`
+reads the GPU copy. BC1/BC2/BC3 readback handles padded block rows and small mip levels.
+Missing mips and dropped GPU copies report errors rather than plausible black pixels.
+
+`dumpSurface(handle, {from: 'gpu', save: 'mask'})` reads D3D9 targets from the render
+worker when rendering is split. `renderTargetState()` reports that worker's active
+color and depth bindings and recent passes, including their viewport and clear/load mode.
+
+`gpuMathProbe([0, 1], ['log2(input[0])', 'input[1]'])` evaluates scalar WGSL expressions
+with runtime f32 inputs on the live adapter. Non-finite answers are returned as
+`NaN`, `+Inf` or `-Inf`, preserving their meaning in JSON evidence.
 
 ## Reverse-engineering the guest
 

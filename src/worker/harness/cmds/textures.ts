@@ -19,6 +19,7 @@ import { HarnessError, HarnessErrorCode } from "../rpc";
 import { getModule, guestMem, serializeSurfaces, sys } from "../serialize";
 import { bytesToBase64, debugDumpPath } from "./screen";
 import { devices as d3d9Devices } from "../../modules/d3d9/shared-state";
+import { textureWriteLog } from "../../modules/d3d9/texture-write-log";
 import { surfaceInfo as d3d8SurfaceInfo, devices as d3d8Devices } from "../../modules/d3d8/shared-state";
 import { cancelCapture as frameCaptureCancel, startCapture as frameCaptureStart } from "../../modules/ddraw/frame-capture";
 import { armSurfaceOps, takeSurfaceOps } from "../../modules/ddraw/surface-op-log";
@@ -59,6 +60,45 @@ export async function encodePngBase64(rgba: Uint8Array, w: number, h: number): P
 }
 
 export function registerTextureCommands(svc: HarnessService): void {
+    svc.register("textureWrites", (args) => {
+        const options = args[0] as Parameters<typeof textureWriteLog.configure>[0];
+        for (const field of ['width', 'height', 'format', 'limit'] as const) {
+            const value = options?.[field];
+            if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+                throw new HarnessError(`textureWrites: ${field} must be a positive integer`, HarnessErrorCode.BAD_ARGS);
+            }
+        }
+        return textureWriteLog.configure(options);
+    });
+    svc.register("renderTargetState", async () => {
+        const {getD3D9RenderClient}=await import('../../render/d3d9-render-client');
+        const client=getD3D9RenderClient();
+        if(client) {
+            const {d3d9SplitFlush}=await import('../../modules/d3d9/split');
+            d3d9SplitFlush();
+            return client.request('targetState',{});
+        }
+        return [...d3d9Devices].map(([slot,dev])=>({slot,state:dev.getRtDebug(),passes:dev.getPassDebug()}));
+    });
+    /** shaderOutputOverride(vs, ps, expression|null): replace one pair's final RGBA expression. */
+    svc.register("shaderOutputOverride", async (args) => {
+        const [vs, ps, expression] = args;
+        if (!Number.isInteger(vs) || !Number.isInteger(ps) || Number(vs) < 0 || Number(ps) < 0
+            || (expression !== null && (typeof expression !== "string" || !expression.trim()))) {
+            throw new HarnessError("expected shader handles and a WGSL vec4 expression, or null to restore", HarnessErrorCode.BAD_ARGS);
+        }
+        const { getD3D9RenderClient } = await import("../../render/d3d9-render-client");
+        const client = getD3D9RenderClient();
+        if (client) {
+            const { d3d9SplitFlush } = await import("../../modules/d3d9/split");
+            d3d9SplitFlush();
+            return client.request("shaderOutputOverride", { vs, ps, expression });
+        }
+        for (const dev of d3d9Devices.values()) {
+            dev.setShaderOutputOverride(Number(vs), Number(ps), expression as string | null);
+        }
+        return { vs, ps, expression };
+    });
     /** Bound palette and upload generations expose a palette change that never reached scanout. */
     svc.register("paletteInfo", (args) => {
         const dd = ddraw(), ptr = resolvePtr(args[0] ?? "primary");
@@ -156,6 +196,7 @@ export function registerTextureCommands(svc: HarnessService): void {
     const dumpD3d9 = async (
         ptr: number,
         from?: "auto" | "gpu" | "scratch",
+        level = 0,
     ): Promise<{ rgba: Uint8Array; w: number; h: number; format: number } | { err: string } | null> => {
         let reason: { err: string } | null = null;
         for (const dev of d3d9Devices.values()) {
@@ -163,22 +204,32 @@ export function registerTextureCommands(svc: HarnessService): void {
             // with correct geometry and a populated texture renders nothing — a missed upload
             // is invisible from the store side, which is the side every other verb reads.
             if (from === "gpu") {
-                const g = await (dev as any).readRenderTargetRgba?.(ptr);
+                const g = await (dev as any).readRenderTargetRgba?.(ptr, level);
                 if (g && !("err" in g)) return g;
                 reason = g ?? reason;
                 continue;
             }
-            const r = (dev as any).readTextureRgba?.(ptr);
+            const r = (dev as any).readTextureRgba?.(ptr, level);
             if (!r) continue;
             if (!("err" in r)) return r;
             // A render target has no guest copy by construction — go to the GPU for it rather
             // than reporting the absence of something that is right there.
-            const rt = await (dev as any).readRenderTargetRgba?.(ptr);
+            const rt = await (dev as any).readRenderTargetRgba?.(ptr, level);
             if (rt && !("err" in rt)) return rt;
             // Keep WHY it refused. Collapsing the reason into null made every such texture
             // report "no d3d9 texture with that handle" — a diagnostic that sends the reader
             // looking for a resource the gallery is already listing.
             reason = rt ?? r;
+        }
+        if (from !== "scratch") {
+            const { getD3D9RenderClient } = await import("../../render/d3d9-render-client");
+            const client = getD3D9RenderClient();
+            if (client) {
+                const { d3d9SplitFlush } = await import("../../modules/d3d9/split");
+                d3d9SplitFlush();
+                const result = await client.request("textureRgba", {texPtr:ptr,level});
+                if (result) return result as NonNullable<typeof reason> | {rgba:Uint8Array;w:number;h:number;format:number};
+            }
         }
         return reason;
     };
@@ -312,12 +363,12 @@ export function registerTextureCommands(svc: HarnessService): void {
         if (dd?.readSurfaceRGBA) {
             const r = await dd.readSurfaceRGBA(ptr, opts.from ?? "auto");
             if (!("err" in r)) return emit(r.rgba, r.w, r.h, r.source);
-            const d9 = await dumpD3d9(ptr, opts.from === "guest" ? "auto" : opts.from);
+            const d9 = await dumpD3d9(ptr, opts.from === "guest" ? "auto" : opts.from, opts.level);
             if (!d9) throw new HarnessError(`readSurfaceRGBA: ${r.err} (and no d3d9 texture with that handle)`, HarnessErrorCode.INTERNAL);
             if ("err" in d9) throw new HarnessError(`d3d9 texture 0x${ptr.toString(16)}: ${d9.err}`, HarnessErrorCode.UNSUPPORTED);
             return emit(d9.rgba, d9.w, d9.h, `${d9Source}(fmt ${d9.format})`);
         }
-        const d9 = await dumpD3d9(ptr, opts.from === "guest" ? "auto" : opts.from);
+        const d9 = await dumpD3d9(ptr, opts.from === "guest" ? "auto" : opts.from, opts.level);
         if (!d9) throw new HarnessError("no DDraw surface and no D3D9 texture with that handle", HarnessErrorCode.NOT_FOUND);
         if ("err" in d9) throw new HarnessError(`d3d9 texture 0x${ptr.toString(16)}: ${d9.err}`, HarnessErrorCode.UNSUPPORTED);
         return emit(d9.rgba, d9.w, d9.h, `${d9Source}(fmt ${d9.format})`);
@@ -331,6 +382,13 @@ export function registerTextureCommands(svc: HarnessService): void {
      *  attachment in its own value space, newest store index last, so the first dark,
      *  saturated or NaN link in the chain identifies itself. */
     svc.register("rtGallery", async () => {
+        const { getD3D9RenderClient } = await import("../../render/d3d9-render-client");
+        const client = getD3D9RenderClient();
+        if (client) {
+            const { d3d9SplitFlush } = await import("../../modules/d3d9/split");
+            d3d9SplitFlush();
+            return client.request("targetGallery");
+        }
         const rows: Array<Record<string, unknown>> = [];
         for (const [device, instance] of d3d9Devices) {
             const gallery = (instance as unknown as {
@@ -584,9 +642,9 @@ export function registerTextureCommands(svc: HarnessService): void {
      *  from a default. A draw that cannot resolve vertices (no VB bound, an out-of-range
      *  index/vertex address, a stride the FVF doesn't describe) names the reason in
      *  `firstVerticesUnavailable`/`indexedVerticesUnavailable` — the arrays are never silently
-     *  empty. */
+     *  empty. `minDraws` waits for a complete frame meeting that draw count. */
     svc.register("captureFrame", async (args, ctx: HarnessCtx) => {
-        const opts = (args[0] ?? {}) as { timeoutMs?: number; backend?: string; dumpTargets?: boolean; maxVerts?: number; maxIndexedVerts?: number };
+        const opts = (args[0] ?? {}) as { timeoutMs?: number; backend?: string; dumpTargets?: boolean; maxVerts?: number; maxIndexedVerts?: number; minDraws?: number; minRenderTargets?: number };
         const timeoutMs = opts.timeoutMs ?? 5000;
         let timeout: ReturnType<typeof setTimeout> | undefined;
         let abortReason: Error | undefined;
@@ -605,12 +663,12 @@ export function registerTextureCommands(svc: HarnessService): void {
             const { getD3D9RenderClient } = await import("../../render/d3d9-render-client");
             const client = opts.backend === "d3d9" ? getD3D9RenderClient() : null;
             const recording = client
-                ? client.request("captureFrame", { timeoutMs, maxVerts: opts.maxVerts, maxIndexedVerts: opts.maxIndexedVerts }).then((answer) => {
+                ? client.request("captureFrame", { timeoutMs, maxVerts: opts.maxVerts, maxIndexedVerts: opts.maxIndexedVerts, minDraws: opts.minDraws, minRenderTargets: opts.minRenderTargets }).then((answer) => {
                     const result = answer as typeof frame & { error?: string };
                     if (!result || result.error || !Array.isArray(result.drawCalls)) throw new HarnessError(result?.error ?? "invalid render-worker frame capture", HarnessErrorCode.UNSUPPORTED);
                     return result;
                 })
-                : frameCaptureStart(opts.backend, { maxVerts: opts.maxVerts, maxIndexedVerts: opts.maxIndexedVerts });
+                : frameCaptureStart(opts.backend, { maxVerts: opts.maxVerts, maxIndexedVerts: opts.maxIndexedVerts, minDraws: opts.minDraws, minRenderTargets: opts.minRenderTargets });
             frame = await Promise.race([recording, aborted]);
         } catch (e) {
             frameCaptureCancel(e instanceof Error ? e : abortReason ?? new Error(String(e)));
@@ -717,7 +775,17 @@ export function registerTextureCommands(svc: HarnessService): void {
      *  fixed draw count, and on a deferred renderer a shadow map's does not — it follows the
      *  units and the camera — so the same index names a different draw each frame and the
      *  bisect reads as noise. Scope the scrub whenever a pass you care about is not the first. */
-    svc.register("drawScrub", (args) => {
+    svc.register("drawScrub", async (args) => {
+        const { getD3D9RenderClient } = await import("../../render/d3d9-render-client");
+        const client = getD3D9RenderClient();
+        if (client) {
+            const { d3d9SplitFlush } = await import("../../modules/d3d9/split");
+            d3d9SplitFlush();
+            return client.request("drawScrub", args.length ? {
+                min: Number(args[0] ?? 0) | 0, max: args[1] === undefined ? -1 : Number(args[1]) | 0,
+                target: Number(args[2] ?? 0) >>> 0, exclude: args[3] === true,
+            } : {});
+        }
         const dev: any = sys().services?.render?.getActive?.();
         const ddrawExec: any = ddraw()?.context?.executor;
         if (!dev?.setDrawScrub && ddrawExec?.setDebugToggle) {
@@ -743,7 +811,7 @@ export function registerTextureCommands(svc: HarnessService): void {
             const max = args[1] === undefined ? -1 : Number(args[1]) | 0;
             // Third argument scopes the cut to ONE render target, numbering draws within it.
             const target = args[2] === undefined ? 0 : Number(args[2]) >>> 0;
-            dev.setDrawScrub(min, max, target);
+            dev.setDrawScrub(min, max, target, args[3] === true);
         }
         return dev.getDrawScrub();
     });

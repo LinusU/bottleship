@@ -51,6 +51,8 @@ export interface CallbackInvocation {
     directThunkReturn?: {
         returnAddr: number;
         postEsp: number;
+        entryEsp?: number;
+        cancel?: () => void;
         complete?: (callbackReturnValue: number) => number | null;
     };
 }
@@ -112,6 +114,8 @@ export interface InvokeCallbackOptions {
     directThunkReturn?: {
         returnAddr: number;
         postEsp: number;
+        entryEsp?: number;
+        cancel?: () => void;
         complete?: (callbackReturnValue: number) => number | null;
     };
 }
@@ -440,6 +444,13 @@ export class CallbackManager {
             );
             this.releaseCallbackWithFatal(functionId, stub, 0x3003, functionId >>> 0, System.getInstance().scheduler.getCurrentThreadId() >>> 0);
             return;
+        }
+        if (callback.directThunkReturn) {
+            const currentThread = System.getInstance().scheduler.getCurrentThreadId() >>> 0;
+            if (callback.ownerThreadId !== currentThread) {
+                this.releaseCallbackWithFatal(functionId, stub, 0x3003, functionId >>> 0, currentThread);
+                return;
+            }
         }
         // Abandonment probe: the stub OUT fired AND a pending record exists — the
         // callback genuinely returned through its stub. Compare against dispatch.invoked.
@@ -782,6 +793,7 @@ export class CallbackManager {
 
     /** Report a fatal error then release the callback. */
     private releaseCallbackWithFatal(functionId: number, stub: CallbackReturnStub, code: number, arg: number, threadId: number): void {
+        this.pendingCallbacks.get(functionId)?.directThunkReturn?.cancel?.();
         this.reportFatalFromCallback(code, arg, threadId);
         this.releaseCallback(functionId, stub);
     }
@@ -1324,6 +1336,7 @@ export class CallbackManager {
         const view = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
 
         let esp = cpu.reg32[4];
+        if (options?.directThunkReturn?.entryEsp !== undefined) esp = options.directThunkReturn.entryEsp;
         // If callback belongs to a suspended-thunk completion chain, always anchor setup
         // to the saved thunk entry ESP. This avoids stacking on temporary stub frames
         // (e.g. PUSH EAX in callback return stub), which corrupts callerRet.
@@ -1374,6 +1387,7 @@ export class CallbackManager {
         const totalBytes = (args.length + 1) * 4;
         const newEsp = esp - totalBytes;
         if (!MemoryGuard.checkStackWrite(mem, newEsp, totalBytes, "CallbackManager.invokeCallback")) {
+            stub.inUse = false;
             const error = new CallbackError(
                 'Invoke callback aborted due to stack bounds',
                 callbackAddress,
@@ -1569,6 +1583,7 @@ export class CallbackManager {
      * Reset the callback manager - clear pending callbacks.
      */
     reset(): void {
+        this.cancelDirectCalls();
         this.pendingCallbacks.clear();
         this.resetPendingSlots();
         this.nextCallbackId = 1;
@@ -1578,6 +1593,16 @@ export class CallbackManager {
         // Re-initialize stubs in memory just in case
         this.initialize();
         Logger.log(LogCategory.CALLBACK, 'CallbackManager reset');
+    }
+
+    /** Close generator-backed calls before their scratch allocations can be recycled. */
+    cancelDirectCalls(): void {
+        for (const [id, callback] of this.pendingCallbacks) {
+            if (!callback.directThunkReturn?.cancel) continue;
+            callback.directThunkReturn.cancel();
+            const stub = this.stubsById.get(id);
+            if (stub) this.releaseCallback(id, stub);
+        }
     }
 
     hasSavedThunkContext(): boolean {

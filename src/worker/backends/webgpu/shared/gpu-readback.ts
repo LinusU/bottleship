@@ -1,4 +1,5 @@
 /// <reference types="@webgpu/types" />
+import { decodeDxtToRgba, D3DFMT_DXT1, D3DFMT_DXT3, D3DFMT_DXT5 } from "./dxt";
 
 /**
  * Read one mip level of a GPUTexture back to RGBA8, via copyTextureToBuffer + mapAsync.
@@ -12,6 +13,7 @@ function readbackTexelBytes(format: GPUTextureFormat): number | null {
         case "r16float": return 2;
         case "rg16float": return 4;
         case "rgba16float": return 8;
+        case "rgba16unorm": return 8;
         case "r32float": return 4;
         case "rg32float": return 8;
         case "rgba32float": return 16;
@@ -39,13 +41,21 @@ export async function readGpuTextureRgba(
     height: number,
     level = 0,
 ): Promise<Uint8Array> {
+    const bcFormat = texture.format.replace(/-srgb$/, "");
+    const dxtFormat = bcFormat === "bc1-rgba-unorm" ? D3DFMT_DXT1
+        : bcFormat === "bc2-rgba-unorm" ? D3DFMT_DXT3
+        : bcFormat === "bc3-rgba-unorm" ? D3DFMT_DXT5 : null;
     const texelBytes = readbackTexelBytes(texture.format);
-    if (texelBytes === null) {
+    if (texelBytes === null && dxtFormat === null) {
         throw new Error(`readGpuTextureRgba: no readback layout for ${texture.format}`);
     }
-    const padded = Math.ceil(width * texelBytes / 256) * 256;
+    const blocksWide = Math.ceil(width / 4);
+    const blocksHigh = Math.ceil(height / 4);
+    const padded = Math.ceil((dxtFormat !== null
+        ? blocksWide * (dxtFormat === D3DFMT_DXT1 ? 8 : 16)
+        : width * texelBytes!) / 256) * 256;
     const readback = device.createBuffer({
-        size: padded * height,
+        size: padded * (dxtFormat !== null ? blocksHigh : height),
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
@@ -53,17 +63,23 @@ export async function readGpuTextureRgba(
         encoder.copyTextureToBuffer(
             { texture, mipLevel: level },
             { buffer: readback, bytesPerRow: padded },
-            { width, height, depthOrArrayLayers: 1 },
+            { width: dxtFormat !== null ? blocksWide * 4 : width,
+                height: dxtFormat !== null ? blocksHigh * 4 : height, depthOrArrayLayers: 1 },
         );
         queue.submit([encoder.finish()]);
         await readback.mapAsync(GPUMapMode.READ);
         const mapped = new Uint8Array(readback.getMappedRange());
         const rgba = new Uint8Array(width * height * 4);
-        if (texture.format.endsWith("float")) {
+        if (dxtFormat !== null) {
+            // Compressed copies step in block rows, including small mip levels.
+            decodeDxtToRgba(dxtFormat, mapped, padded, width, height, rgba);
+            return rgba;
+        }
+        if (texture.format.endsWith("float") || texture.format === "rgba16unorm") {
             // A float attachment carries values outside [0,1]; this seam is the 8-bit
             // RGBA one every caller consumes, so clamp rather than wrap.
             const wide = texture.format.endsWith("32float");
-            const channels = wide ? texelBytes >> 2 : texelBytes >> 1;
+            const channels = wide ? texelBytes! >> 2 : texelBytes! >> 1;
             const words = wide
                 ? new Float32Array(mapped.buffer, mapped.byteOffset, mapped.byteLength >> 2)
                 : new Uint16Array(mapped.buffer, mapped.byteOffset, mapped.byteLength >> 1);
@@ -77,7 +93,7 @@ export async function readGpuTextureRgba(
                     for (let c = 0; c < 4; c++) {
                         if (c >= channels) { rgba[d + c] = c === 3 ? 255 : 0; continue; }
                         const raw = words[s + c]!;
-                        const value = wide ? raw : halfToFloat(raw);
+                        const value = wide ? raw : texture.format === "rgba16unorm" ? raw / 65535 : halfToFloat(raw);
                         rgba[d + c] = Math.max(0, Math.min(255, Math.round((value || 0) * 255)));
                     }
                 }
@@ -147,17 +163,19 @@ export async function readGpuTextureStats(
         const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
         const wide = texture.format.endsWith("32float");
         const half = texture.format.endsWith("16float");
+        const normalized16 = texture.format === "rgba16unorm";
         const stepY = Math.max(1, Math.floor(height / gridSteps));
         const stepX = Math.max(1, Math.floor(width / gridSteps));
         // EVERY channel, not just the first. Reading one channel and labelling the answer
         // "the texture" reports a black opaque frame as saturated (alpha) and a blue-tinted
         // one as empty (red) — a rendering verdict drawn from a number that never described
         // the image.
-        const bytesPerChannel = wide ? 4 : half ? 2 : 1;
+        const bytesPerChannel = wide ? 4 : half || normalized16 ? 2 : 1;
         const channelCount = Math.max(1, Math.min(4, Math.floor(texelBytes / bytesPerChannel)));
         const readChannel = (offset: number): number => (
             wide ? view.getFloat32(offset, true)
                 : half ? halfToFloat(view.getUint16(offset, true))
+                : normalized16 ? view.getUint16(offset, true) / 65535
                 : raw[offset]! / 255
         );
         const chMin = new Array<number>(channelCount).fill(Infinity);

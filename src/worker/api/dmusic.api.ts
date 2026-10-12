@@ -1,9 +1,8 @@
 /**
  * DirectMusic (dmusic.dll / dmime.dll) API descriptor.
  *
- * ZenGin (Gothic) and other DX7/DX8-era engines create the loader and performance
- * through CoCreateInstance and abort music init when either fails, so the COM surface
- * has to exist even where playback does not. Vtable SLOT ORDER is the contract here —
+ * DX7/DX8-era engines create the loader, performance and the loadable objects through
+ * CoCreateInstance and abort music init when any of it fails. Vtable SLOT ORDER is the contract here —
  * a method at the wrong index is a call to the wrong function with the wrong arity, so
  * every list below is the full inheritance chain in declaration order, never a subset.
  */
@@ -250,10 +249,101 @@ export const IDirectMusicPort: InterfaceDescriptor = {
     ],
 };
 
+// The interfaces below are reached only through QueryInterface or a method of another
+// DirectMusic object, never by IID through CoCreateInstance's generic path, so they carry
+// no `iid`: the module answers for them itself.
+
+/** Every loadable DirectMusic object (segment, style, band, collection) is one of these. */
+export const IDirectMusicObject: InterfaceDescriptor = {
+    name: "IDirectMusicObject",
+    inherits: "IUnknown",
+    methods: [
+        ...unknown(),
+        m("GetDescriptor", 2),
+        m("SetDescriptor", 2),
+        m("ParseDescriptor", 3),
+    ],
+};
+
+/** IPersistStream as the loadable objects expose it: a loader hands Load the file's stream. */
+export const IDirectMusicPersistStream: InterfaceDescriptor = {
+    name: "IDirectMusicPersistStream",
+    inherits: "IUnknown",
+    methods: [
+        ...unknown(),
+        m("GetClassID", 2),
+        m("IsDirty", 1),
+        m("Load", 2),
+        m("Save", 3),
+        m("GetSizeMax", 2),
+    ],
+};
+
+export const IDirectMusicStyle8: InterfaceDescriptor = {
+    name: "IDirectMusicStyle8",
+    inherits: "IUnknown",
+    methods: [
+        ...unknown(),
+        // IDirectMusicStyle
+        m("GetBand", 3),
+        m("EnumBand", 3),
+        m("GetDefaultBand", 2),
+        m("EnumMotif", 3),
+        m("GetMotif", 3),
+        m("GetDefaultChordMap", 2),
+        m("EnumChordMap", 3),
+        m("GetChordMap", 3),
+        m("GetTimeSignature", 2),
+        m("GetEmbellishmentLength", 5),
+        m("GetTempo", 2),
+        // IDirectMusicStyle8
+        m("EnumPattern", 5),
+    ],
+};
+
+export const IDirectMusicBand: InterfaceDescriptor = {
+    name: "IDirectMusicBand",
+    inherits: "IUnknown",
+    methods: [
+        ...unknown(),
+        m("CreateSegment", 2),
+        m("Download", 2),
+        m("Unload", 2),
+    ],
+};
+
+export const IDirectMusicCollection: InterfaceDescriptor = {
+    name: "IDirectMusicCollection",
+    inherits: "IUnknown",
+    methods: [
+        ...unknown(),
+        m("GetInstrument", 3),
+        m("EnumInstrument", 5),
+    ],
+};
+
+export const IDirectMusicTrack: InterfaceDescriptor = {
+    name: "IDirectMusicTrack",
+    inherits: "IUnknown",
+    methods: [
+        ...unknown(),
+        m("Init", 2),
+        m("InitPlay", 6),
+        m("EndPlay", 2),
+        m("Play", 9),
+        m("GetParam", 5),
+        m("SetParam", 4),
+        m("IsParamSupported", 2),
+        m("AddNotificationType", 2),
+        m("RemoveNotificationType", 2),
+        m("Clone", 4),
+    ],
+};
+
 export const dmusicModule: ModuleDescriptor = {
     name: "dmusic",
     version: "8.0",
-    description: "DirectMusic loader/performance COM surface (silent playback)",
+    description: "DirectMusic: loader, performance, composer, style playback over a DLS synthesizer",
     functions: [],
     interfaces: [
         IDirectMusicLoader8,
@@ -264,5 +354,11 @@ export const dmusicModule: ModuleDescriptor = {
         IDirectMusicComposer8,
         IDirectMusic8,
         IDirectMusicPort,
+        IDirectMusicObject,
+        IDirectMusicPersistStream,
+        IDirectMusicStyle8,
+        IDirectMusicBand,
+        IDirectMusicCollection,
+        IDirectMusicTrack,
     ],
 };

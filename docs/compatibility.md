@@ -35,12 +35,14 @@ GOG extraction does not establish gameplay coverage for that installer edition.
 | Need for Speed: Porsche Unleashed | playable\* | |
 | Need for Speed: Underground | playable | |
 | Need for Speed: Underground 2 | playable | |
+| Midtown Madness 2 (full game) | runtime imported; gameplay unverified† | |
 | Carmageddon 2: Carpocalypse Now | playable | ✓ |
 | Star Wars Episode I: Racer | playable | ✓ |
 | Unreal Gold | playable | |
 | Unreal Tournament (demo) | playable | |
 | Quake II | playable | ✓ |
 | Half-Life: Uplink / Day One (demos) | playable | |
+| Half-Life 2 | boots | |
 | Red Faction | playable | ✓ |
 | Grand Theft Auto III | playable | |
 | Grand Theft Auto: Vice City | playable | |
@@ -80,6 +82,14 @@ GOG extraction does not establish gameplay coverage for that installer edition.
 
 \* retail has an intermittent mode-switch hiccup; the demo does not.
 
+† The MCIWnd and DirectMusic runtime was imported from LinusU's full-game branch,
+with targeted stack, stream, lifetime and parser regressions. The October 12 integration
+does not include a game run; full-game playability and audio/video fidelity have not been
+independently accepted. Use a lawfully obtained installed game for any future test.
+BottleShip does not implement SafeDisc or ship the game, movies or Windows gm.dls.
+Instruments that reference the default GM collection remain silent when that collection
+is absent. The trial's earlier gameplay verification does not validate the full game.
+
 The working collection also covers full builds alongside the production demos of Re-Volt,
 Heroes III, StarCraft, Diablo II, Max Payne, Harry Potter 1, NFS Porsche and NFS Underground.
 The Re-Volt beta is a separate working build, not a replacement for the released demo.
@@ -87,6 +97,15 @@ The Re-Volt beta is a separate working build, not a replacement for the released
 System Shock 2 coverage is for the original 1999 game, including previously purchased GOG
 copies; it does not cover the 2025 remaster. Unreal Gold's former GOG edition is delisted.
 Quake II coverage is for the classic Win32 executable, rather than the Enhanced executable.
+Half-Life 2 coverage is for `hl2-20th.wgb` (checked 2026-10-10): ordinary New Game plays the
+G-Man introduction and reaches the starting train, platform, station corridor, waiting hall
+and security checkpoint, with movement, turning and audio verified. Menu text, sky textures
+and interior lighting are corrected; these scenes use `mat_fullbright=0`. Quicksaves from
+the ordinary starting train survive a full browser/worker restart and match committed OPFS
+bytes exactly. A separate direct-map check of `d1_trainstation_02` verifies quicksave
+overwrites, F9 restoration and loading after a full browser/worker restart. The normal
+transition to the second map and the full campaign have not been tested. Occlusion intervals
+spanning render passes currently report unavailable.
 The original Bard's Tale and Worms World Party demos are older editions than the working
 remasters. The original Bard's Tale demo has now been checked independently (see below);
 Worms World Party's original demo reaches its startup splash; match entry remains unverified.

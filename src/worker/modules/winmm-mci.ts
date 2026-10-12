@@ -203,6 +203,33 @@ function parseMciTimeString(format: number, text: string): number | null {
     return packed >>> 0;
 }
 
+/** Frame size from an AVI's main header (`avih`), which is what MCIAVI answers `where` from. */
+export function aviFrameSize(bytes: Uint8Array): { width: number; height: number } | null {
+    const tag = (o: number): string => String.fromCharCode(bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]);
+    if (bytes.length < 12 || tag(0) !== "RIFF" || tag(8) !== "AVI ") return null;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const end = 8 + view.getUint32(4, true);
+    if (end < 12 || end > bytes.length) return null;
+    for (let o = 12; o + 8 <= end;) {
+        const size = view.getUint32(o + 4, true);
+        const chunkEnd = o + 8 + size;
+        if (chunkEnd > end) return null;
+        if (tag(o) === "LIST" && size >= 4 && tag(o + 8) === "hdrl") {
+            for (let h = o + 12; h + 8 <= chunkEnd;) {
+                const headerSize = view.getUint32(h + 4, true);
+                if (h + 8 + headerSize > chunkEnd) return null;
+                if (tag(h) === "avih" && headerSize >= 40) {
+                    const width = view.getUint32(h + 40, true), height = view.getUint32(h + 44, true);
+                    return width && height ? { width, height } : null;
+                }
+                h += 8 + headerSize + (headerSize & 1);
+            }
+        }
+        o += 8 + size + (size & 1);
+    }
+    return null;
+}
+
 interface MCIDevice {
     id: number;
     name: string;
@@ -1319,6 +1346,27 @@ export class WinmmMci {
 
     // ==================== MCI string interface ====================
 
+    /**
+     * The string interface for in-process clients — MCIWnd drives its device with the same
+     * commands a guest would send. A play that parks its caller (video open is async) is
+     * started and not awaited: `status mode` is how such a client follows it.
+     */
+    executeString(command: string, hwndCallback: number = 0): { error: number; value: string } {
+        let value = "";
+        const result = this.sendMciString(command, hwndCallback, (v) => { value = v; });
+        if (typeof result === "number") return { error: result, value };
+        if (result instanceof Promise) {
+            result.catch((e) => Logger.error(LogCategory.SYSTEM, `MCI "${command}" failed: ${e}`));
+            return { error: MMSYSERR_NOERROR, value };
+        }
+        return { error: (result.value ?? MMSYSERR_NOERROR) >>> 0, value };
+    }
+
+    /** Device id behind an alias or element name, 0 when none is open. */
+    deviceIdOf(nameOrAlias: string): number {
+        return this.findMciDevice(nameOrAlias)?.id ?? 0;
+    }
+
     /** Shared body of mciSendStringA/W; `emit` writes the command's return string.
      *  Video playback with MCI_WAIT parks the thunk, hence the ThunkResult union. */
     private sendMciString(
@@ -1496,6 +1544,27 @@ export class WinmmMci {
                 device.hwndWindow = parseInt(tokens[handleIdx + 1], 0) >>> 0;
                 Logger.log(LogCategory.SYSTEM, `mciSendString window: ${device.alias} hwnd=0x${device.hwndWindow.toString(16)}`);
             }
+            return MMSYSERR_NOERROR;
+        }
+
+        if (verb === "where") {
+            if (tokens.length < 2) return MCIERR_MISSING_STRING_ARGUMENT;
+            const device = this.findMciDevice(tokens[1]);
+            if (!device) return MCIERR_INVALID_DEVICE_NAME;
+            if (!this.isMciVideoDevice(device)) return MCIERR_UNSUPPORTED_FUNCTION;
+            const which = tokens.slice(2).map((t) => t.toLowerCase());
+            if (which.length !== 1 || (which[0] !== "source" && which[0] !== "destination")) {
+                return MCIERR_UNSUPPORTED_FUNCTION;
+            }
+            if (which.includes("destination") && device.windowRect) {
+                const r = device.windowRect;
+                emit(`${r.x} ${r.y} ${r.w} ${r.h}`);
+                return MMSYSERR_NOERROR;
+            }
+            this.preloadMciVideoDevice(device);
+            const size = device.videoFileBytes ? aviFrameSize(device.videoFileBytes) : null;
+            if (!size) return MCIERR_UNSUPPORTED_FUNCTION;
+            emit(`0 0 ${size.width} ${size.height}`);
             return MMSYSERR_NOERROR;
         }
 

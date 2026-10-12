@@ -1023,6 +1023,19 @@ export class ThunkDispatcher {
         this.notifySchedulerBoundary(cpu);
     }
 
+    private completeFailedSyncCall(id: number, name: string, cpu: any, esp: number, argCount: number): void {
+        // The emitted RET still runs when a handler is missing or fails.
+        const cleanup = this.resolveThunkCleanup(id, argCount, name);
+        this.lastThunkId = id;
+        this.lastThunkName = name;
+        this.lastExpectedEspAfterReturn = esp + 4 + cleanup;
+        this.lastThunkIdAfterReturn = id;
+        this.lastThunkNameAfterReturn = name;
+        this.winApiRing.recordReturnValue(this.regsRaw[0] >>> 0);
+        this.recordShadowStackAtEntry(id, esp);
+        this.setBoundaryAndNotify(cpu, ThunkBoundaryKind.THUNK_STUB, cleanup);
+    }
+
     /**
      * Dump callback-manager and callback-queue forensic state.
      * Called only on critical faults to keep hot path clean.
@@ -1548,9 +1561,16 @@ export class ThunkDispatcher {
     }
 
     private ensureWbufQueue(bytes: number): void {
+        // Resource uploads can accumulate without a Present; ship complete entries before
+        // growing the queue. One payload may exceed the batch limit and stays indivisible.
+        const appendBytes = bytes - this.wbufQueueEnd;
+        if (this.wbufQueueEnd > 0 && bytes > WBUF_DEFER_QUEUE_LIMIT) {
+            this.executeWbufQueue();
+            bytes = this.wbufQueueEnd + appendBytes;
+        }
         if (this.wbufQueueU8 && this.wbufQueueU8.length >= bytes) return;
         const size = Math.max(bytes, (this.wbufQueueU8?.length ?? 0) * 2, 1 << 20);
-        const buffer = new ArrayBuffer((size + 4095) & ~4095);
+        const buffer = new ArrayBuffer(Math.ceil(size / 4096) * 4096);
         const u8 = new Uint8Array(buffer);
         if (this.wbufQueueU8) u8.set(this.wbufQueueU8.subarray(0, this.wbufQueueEnd));
         this.wbufQueueU8 = u8;
@@ -2606,7 +2626,7 @@ export class ThunkDispatcher {
         if (!impl) {
             this._slowPathMissingImplementation(functionId, cpu, thunkName);
             if (profileThunk) profiler.endAsync(thunkName);
-            this.setBoundaryAndNotify(cpu, ThunkBoundaryKind.THUNK_STUB, 0);
+            this.completeFailedSyncCall(functionId, thunkName, cpu, espAtEntry, argCount);
             if (sampleProfiler) profiler.end("thunk_dispatch");
             return;
         }
@@ -2623,7 +2643,7 @@ export class ThunkDispatcher {
         if (!this.validateReturnAddrFast(espAtEntry, allowStubPoolRet)) {
             this._slowPathInvalidReturnPreCall(functionId, thunkName, espAtEntry, cpu);
             if (profileThunk) profiler.endAsync(thunkName);
-            this.setBoundaryAndNotify(cpu, ThunkBoundaryKind.THUNK_STUB, 0);
+            this.completeFailedSyncCall(functionId, thunkName, cpu, espAtEntry, argCount);
             if (sampleProfiler) profiler.end("thunk_dispatch");
             return;
         }
@@ -2687,7 +2707,7 @@ export class ThunkDispatcher {
         } catch (e) {
             this._slowPathHandleThunkError(functionId, thunkName, e, cpu);
             if (profileThunk) profiler.endAsync(thunkName);
-            this.setBoundaryAndNotify(cpu, ThunkBoundaryKind.THUNK_STUB, 0);
+            this.completeFailedSyncCall(functionId, thunkName, cpu, espAtEntry, argCount);
             if (sampleProfiler) profiler.end("thunk_dispatch");
             const dur = frameProfiler.endTimer("thunk", thunkStart);
             frameProfiler.recordThunk(thunkName, dur);

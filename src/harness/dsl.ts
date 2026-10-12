@@ -351,18 +351,27 @@ export class HarnessChain {
      *  frame boundary ends it — without it, a title where two paths present returns the other
      *  path's empty frame and that reads exactly like "no draws happened". `dumpTargets` adds
      *  the distinct render attachments the frame drew into. */
-    captureFrame(opts?: { dumpTargets?: boolean; backend?: "ddraw" | "d3d8" | "d3d9"; timeoutMs?: number }): this { return this.push("captureFrame", [opts]); }
+    captureFrame(opts?: { dumpTargets?: boolean; backend?: "ddraw" | "d3d8" | "d3d9"; timeoutMs?: number; maxVerts?: number; maxIndexedVerts?: number; minDraws?: number; minRenderTargets?: number }): this {
+        const deadline = opts?.timeoutMs ?? 5_000;
+        return this.pushTimed("captureFrame", [opts], deadline > 0 ? deadline + 5_000 : 0);
+    }
     /** Flip one render-backend DebugFlag (alpha test/blend, z test, texture resync, converter
      *  debug colours...). The first toggle that makes an invisible draw appear names the stage
      *  that was dropping it. Omit `name` to read the currently-armed flags. Sticky — clear them. */
     gpuToggle(name?: string, enabled?: boolean, value?: number): this { return this.push("gpuToggle", [name, enabled, value]); }
     textures(): this { return this.push("textures", []); }
     dumpTexture(sel: string | { stage: number }): this { return this.push("dumpTexture", [sel]); }
-    dumpSurface(sel: string): this { return this.push("dumpSurface", [sel]); }
+    dumpSurface(sel: string|number, opts?: {save?: string;from?: "auto"|"gpu"|"scratch";level?: number}): this {
+        return this.push("dumpSurface", opts ? [sel,opts] : [sel]);
+    }
     /** WHICH GDI surface holds what: every live DC, every retained window-client image and
      *  the overlay, each with an opaque/non-black/luma summary. An all-black surface is then
      *  a measurement rather than a deduction about DC topology. */
     gdiDcs(opts?: { pixels?: boolean }): this { return this.push("gdiDcs", [opts]); }
+    /** Check the font Canvas actually uses against the DC's cached selection. */
+    gdiFonts(opts?: { hdc?: number; text?: string; assert?: boolean }): this { return this.push("gdiFonts", [opts]); }
+    /** Arm before loading to see which matching textures received CPU pixel bytes. */
+    textureWrites(opts?: { arm?: boolean; width?: number; height?: number; format?: number; limit?: number }): this { return this.push("textureWrites", [opts]); }
     /** One GDI surface as a PNG: "dc:<hdc>" | "client:<hwnd>" | "bitmap:<hbitmap>" | "overlay". */
     gdiDump(sel: string, save?: string): this { return this.push("gdiDump", [sel, save]); }
     /** DDraw composition-op ring: `{arm:N}` to record the next N Blt/BltFast/Flip/Load/fill ops,
@@ -565,6 +574,7 @@ export class HarnessChain {
     fsList(path: string): this { return this.push("fsList", [path]); }
     fsStat(path: string): this { return this.push("fsStat", [path]); }
     fsFlush(): this { return this.push("fsFlush", []); }
+    fsDurability(path: string): this { return this.push("fsDurability", [path]); }
     /** Does flushAll still settle, and which path is holding it? A stuck commit stalls
      *  child-process/guest exit silently, and reads from outside as a busy guest. */
     fsFlushHealth(opts?: { timeoutMs?: number }): this { return this.pushTimed("fsFlushHealth", [opts], (opts?.timeoutMs ?? 5000) + 10_000); }
