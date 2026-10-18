@@ -171,6 +171,26 @@ function mirrorToSelectedBitmap(
     } catch { /* mismatched/zero-sized canvases: nothing to mirror */ }
 }
 
+/**
+ * PatBlt: the ROPs that read only the brush and the destination. Those are BitBlt's
+ * source-less ROPs, so they share its path, DIB-section write-back included.
+ */
+export function patBlt(gdi: GDIContext, hdc: number, x: number, y: number, width: number, height: number,
+       rop: number): boolean {
+    const PATCOPY = 0x00F00021;
+    const BLACKNESS = 0x00000042;
+    const WHITENESS = 0x00FF0062;
+    const DSTINVERT = 0x00550009;
+    if (width < 0) { x += width; width = -width; }
+    if (height < 0) { y += height; height = -height; }
+    if (rop === PATCOPY) return gdi.fillRect(hdc, x, y, x + width, y + height);
+    if (rop === BLACKNESS || rop === WHITENESS || rop === DSTINVERT) {
+        return bitBlt(gdi, hdc, x, y, width, height, 0, 0, 0, rop);
+    }
+    Logger.warn(LogCategory.GDI32, `PatBlt: unsupported ROP 0x${rop.toString(16)}, treating as success`);
+    return true;
+}
+
 export function bitBlt(gdi: GDIContext, hdcDest: number, x: number, y: number, width: number, height: number,
        hdcSrc: number, xSrc: number, ySrc: number, rop: number): boolean {
 
