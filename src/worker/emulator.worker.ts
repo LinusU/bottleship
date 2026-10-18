@@ -115,6 +115,7 @@ import { D3dx9 } from "./modules/d3dx9";
 import { OpenAL, ALUT } from "./modules/openal/openal";
 import { Quartz } from "./modules/quartz";
 import { DMusic } from "./modules/dmusic";
+import { Amstream } from "./modules/amstream";
 import { A3d } from "./modules/a3d";
 import { Avifil32 } from "./modules/avifil32";
 import { Rpcrt4 } from "./modules/rpcrt4";
@@ -2540,6 +2541,7 @@ const initV86 = async (canvas: OffscreenCanvas) => {
       const lgvid = new Lgvid();
       const quartz = new Quartz();
       const dmusic = new DMusic();
+      const amstream = new Amstream();
       const a3d = new A3d();
       const avifil32 = new Avifil32();
       const rpcrt4 = new Rpcrt4();
@@ -2616,6 +2618,7 @@ const initV86 = async (canvas: OffscreenCanvas) => {
       }
       quartz.initialize(process);
       dmusic.initialize(process);
+      amstream.initialize(process);
       a3d.initialize(process);
       avifil32.initialize(process);
       rpcrt4.initialize(process);
@@ -2695,6 +2698,7 @@ const initV86 = async (canvas: OffscreenCanvas) => {
       }
       process.registerModule(quartz.name, quartz);
       process.registerModule(dmusic.name, dmusic);
+      process.registerModule(amstream.name, amstream);
       process.registerModule(a3d.name, a3d);
       process.registerModule(avifil32.name, avifil32);
       process.registerModule(rpcrt4.name, rpcrt4);
@@ -2772,6 +2776,7 @@ const initV86 = async (canvas: OffscreenCanvas) => {
       }
       process.dispatcher.registerModule(quartz.name, quartz.exports);
       process.dispatcher.registerModule(dmusic.name, dmusic.exports);
+      process.dispatcher.registerModule(amstream.name, amstream.exports);
       process.dispatcher.registerModule(a3d.name, a3d.exports);
       process.dispatcher.registerModule(avifil32.name, avifil32.exports);
       process.dispatcher.registerModule(rpcrt4.name, rpcrt4.exports);
