@@ -47,6 +47,7 @@ import { adoptNamedObjects, namedObjects, type NamedObjectSpec } from "./modules
 import { User32 } from "./modules/user32";
 import { GDI32 } from "./modules/gdi32";
 import { installWindowsFonts } from "./modules/gdi32/installed-fonts";
+import { ensureTempDirectories } from "./modules/kernel32/file-io-path";
 import { D3D9 } from "./modules/d3d9";
 import { Advapi32 } from "./modules/advapi32";
 import { Ntdll } from "./modules/ntdll";
@@ -2002,6 +2003,7 @@ const loadBundleImpl = async (payload: { data?: Uint8Array; url?: string; blob?:
 
     // Always resize host canvas from config (ddraw may not be loaded yet → updateDisplayFromConfig no-op)
     await applyManifestWriteFiles();
+    if (system.process) ensureTempDirectories(system.process.environment, system.fileSystem);
     await installWindowsFonts();
 
     // Generic UE1 first-run: detect engine + pin D3D render device in Default.ini.

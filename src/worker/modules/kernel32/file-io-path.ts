@@ -111,6 +111,17 @@ const writeSearchPathResultA = (
     return required - 1;
 };
 
+/**
+ * The directory GetTempPath reports exists on every Windows install, and programs create
+ * files and folders in it without creating it first. Make the TMP and TEMP directories.
+ */
+export function ensureTempDirectories(environment: Map<string, string>, vfs: Pick<VirtualFileSystem, 'ensureDirTreeSync'>): void {
+    for (const name of ['TMP', 'TEMP']) {
+        const dir = environment.get(name);
+        if (dir) vfs.ensureDirTreeSync(dir);
+    }
+}
+
 export function registerFileIoPathExports(exports: Record<string, ThunkImplementation>): void {
     exports['GetCurrentDirectoryA'] = (ctx, mem, args) => {
         const nBufferLength = args[0];
