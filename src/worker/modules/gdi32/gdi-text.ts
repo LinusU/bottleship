@@ -308,8 +308,9 @@ interface LaidOutLine {
 }
 
 /** tmHeight (plus tmExternalLeading under DT_EXTERNALLEADING) of the DC's selected font —
- *  the per-line advance GDI uses. Same ascent/descent source as GetTextMetrics so a guest
- *  that sizes its own rects from tmHeight agrees with what we lay out. */
+ *  the per-line advance GDI uses. Same ascent/descent source and rounding as GetTextMetrics
+ *  (writeTextMetrics), so a guest that sizes its own rects from tmHeight agrees with what we
+ *  lay out: a rect one tmHeight tall must hold exactly one line. */
 function lineAdvance(ctx: TextCtx, fontSize: number, externalLeading: boolean): number {
     let ascent = fontSize * 0.8;
     let descent = fontSize * 0.2;
@@ -320,7 +321,8 @@ function lineAdvance(ctx: TextCtx, fontSize: number, externalLeading: boolean): 
             descent = m.fontBoundingBoxDescent;
         }
     } catch { /* keep the font-size estimate */ }
-    const height = Math.max(1, Math.ceil(ascent + descent));
+    ascent = Math.ceil(ascent);
+    const height = Math.max(1, ascent + Math.ceil(descent));
     return externalLeading ? height + Math.round(ascent * 0.15) : height;
 }
 

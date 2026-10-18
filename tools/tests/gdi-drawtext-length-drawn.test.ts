@@ -72,3 +72,13 @@ test("DrawTextEx writes uiLengthDrawn, returns the height of the lines it laid o
     view.setUint32(PARAMS, 24, true);
     expect(exports["DrawTextExA"]!(null as never, mem, [1, TEXT, -1, RECT, DT_WORDBREAK, PARAMS])).toBe(0);
 });
+
+test("a rect one tmHeight tall holds one line when the font's extents are fractional", () => {
+    const gdi = fakeGdi() as unknown as { contexts: Map<number, { measureText: (t: string) => unknown }> };
+    // GetTextMetrics reports tmHeight = ceil(9.4) + ceil(2.4) = 13; ceil(11.8) would be 12.
+    gdi.contexts.get(1)!.measureText = (text: string) => ({ width: text.length * CHAR_WIDTH, fontBoundingBoxAscent: 9.4, fontBoundingBoxDescent: 2.4 });
+    const tmHeight = 13;
+    const layout = drawText(gdi as never, 1, "aaaa bbbb cccc", { left: 0, top: 0, right: 10 * CHAR_WIDTH, bottom: tmHeight - 1 }, DT_WORDBREAK)!;
+    expect(layout.lengthDrawn).toBe(10);
+    expect(layout.height).toBe(tmHeight);
+});
