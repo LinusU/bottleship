@@ -292,6 +292,9 @@ export interface DrawTextLayout {
     height: number;
     /** Width of the widest line — what DT_CALCRECT reports as right - left. */
     width: number;
+    /** DRAWTEXTPARAMS.uiLengthDrawn: the source characters of the lines laid out, the
+     *  break each one ends in (CR/LF, the space at a wrap, hidden & prefixes) included. */
+    lengthDrawn: number;
 }
 
 type TextCtx = OffscreenCanvasRenderingContext2D;
@@ -300,6 +303,8 @@ type TextCtx = OffscreenCanvasRenderingContext2D;
 interface LaidOutLine {
     text: string;
     underline: number;
+    /** Characters of the caller's string this line consumes. */
+    consumed: number;
 }
 
 /** tmHeight (plus tmExternalLeading under DT_EXTERNALLEADING) of the DC's selected font —
@@ -334,6 +339,27 @@ function fitPrefix(ctx: TextCtx, s: string, from: number, maxWidth: number): num
         }
     }
     return fit;
+}
+
+/**
+ * For each display character of a raw line, the index of the source character it came from:
+ * tabs expand to `tabLen` spaces, and under prefix processing "&&" shows one "&" while a
+ * lone "&" disappears (the same rules as parseMnemonicText). Ends with the line's length.
+ */
+function displaySourceIndices(raw: string, tabLen: number, processPrefix: boolean): number[] {
+    const expanded: number[] = [];
+    for (let i = 0; i < raw.length; i++) {
+        if (raw[i] === '\t' && tabLen > 0) for (let t = 0; t < tabLen; t++) expanded.push(i);
+        else expanded.push(i);
+    }
+    const out: number[] = [];
+    for (let i = 0; i < expanded.length; i++) {
+        const ch = raw[expanded[i]!];
+        if (!processPrefix || ch !== '&') { out.push(expanded[i]!); continue; }
+        if (i + 1 < expanded.length) out.push(expanded[++i]!);
+    }
+    out.push(raw.length);
+    return out;
 }
 
 /** Greedy DT_WORDBREAK wrap: break at the last space that fits, and mid-word when a single
@@ -442,14 +468,26 @@ export function drawText(
     }
 
     // --- Layout -----------------------------------------------------------------
-    let source = text ?? '';
-    if ((f & (DT_EXPANDTABS | DT_TABSTOP)) !== 0) {
-        // DT_TABSTOP puts the tab length in bits 15..8; default is 8 characters.
-        const tabLen = (f & DT_TABSTOP) !== 0 ? (((f >> 8) & 0xff) || 8) : 8;
-        source = source.replace(/\t/g, ' '.repeat(tabLen));
+    const source = text ?? '';
+    // DT_TABSTOP puts the tab length in bits 15..8; default is 8 characters.
+    const tabLen = (f & (DT_EXPANDTABS | DT_TABSTOP)) === 0 ? 0
+        : (f & DT_TABSTOP) !== 0 ? (((f >> 8) & 0xff) || 8) : 8;
+    const processPrefix = prefixOptions.processPrefix ?? true;
+    // Each raw line with the length of the break that ends it. GDI treats CR/LF as part
+    // of the line in DT_SINGLELINE mode; they render as nothing.
+    const rawLines: Array<{ raw: string; breakLength: number }> = [];
+    if (singleLine) {
+        const raw = source.replace(/[\r\n]/g, '');
+        rawLines.push({ raw, breakLength: source.length - raw.length });
+    } else {
+        const re = /\r\n|[\r\n]/g;
+        let from = 0;
+        for (let m = re.exec(source); m; m = re.exec(source)) {
+            rawLines.push({ raw: source.slice(from, m.index), breakLength: m[0].length });
+            from = m.index + m[0].length;
+        }
+        rawLines.push({ raw: source.slice(from), breakLength: 0 });
     }
-    // GDI treats CR/LF as part of the line in DT_SINGLELINE mode; they render as nothing.
-    const rawLines = singleLine ? [source.replace(/[\r\n]/g, '')] : source.split(/\r\n|[\r\n]/);
 
     const boxWidth = rect ? Math.max(0, rect.right - rect.left) : 0;
     const advance = lineAdvance(ctx, state.fontSize, (f & DT_EXTERNALLEADING) !== 0);
@@ -457,12 +495,15 @@ export function drawText(
 
     const lines: LaidOutLine[] = [];
     let maxWidth = 0;
-    for (const raw of rawLines) {
-        const parsed = parseMnemonicText(raw, prefixOptions.processPrefix ?? true);
+    for (const line of rawLines) {
+        const expanded = tabLen ? line.raw.replace(/\t/g, ' '.repeat(tabLen)) : line.raw;
+        const parsed = parseMnemonicText(expanded, processPrefix);
+        const sourceAt = displaySourceIndices(line.raw, tabLen, processPrefix);
         const segs = wordBreak && rect
             ? wrapLine(ctx, parsed.display, boxWidth)
             : [{ text: parsed.display, start: 0 }];
-        for (const seg of segs) {
+        for (let i = 0; i < segs.length; i++) {
+            const seg = segs[i]!;
             let display = seg.text;
             if (ellipsis && rect && segs.length === 1) {
                 display = ellipsize(ctx, display, boxWidth, (f & DT_PATH_ELLIPSIS) !== 0);
@@ -470,11 +511,21 @@ export function drawText(
             const underline = parsed.underlineIndex >= seg.start && parsed.underlineIndex < seg.start + seg.text.length
                 ? parsed.underlineIndex - seg.start
                 : -1;
-            lines.push({ text: display, underline });
+            const end = i + 1 < segs.length ? sourceAt[segs[i + 1]!.start]! : line.raw.length + line.breakLength;
+            lines.push({ text: display, underline, consumed: end - (i === 0 ? 0 : sourceAt[seg.start]!) });
             maxWidth = Math.max(maxWidth, ctx.measureText(display).width);
         }
     }
-    const layout: DrawTextLayout = { height: lines.length * advance, width: Math.ceil(maxWidth) };
+    // The first line is always laid out; each later one only while it starts inside the
+    // rect, unless DT_NOCLIP (or a DT_CALCRECT measurement) lifts the bottom.
+    let laidOut = lines.length;
+    if (rect && (f & (DT_NOCLIP | DT_CALCRECT)) === 0) {
+        laidOut = 1;
+        while (laidOut < lines.length && rect.top + laidOut * advance <= rect.bottom) laidOut++;
+    }
+    let lengthDrawn = 0;
+    for (let i = 0; i < laidOut; i++) lengthDrawn += lines[i]!.consumed;
+    const layout: DrawTextLayout = { height: lines.length * advance, width: Math.ceil(maxWidth), lengthDrawn };
 
     // DT_CALCRECT measures only — no pixels, no dirty marking.
     if (calcOnly) return layout;
