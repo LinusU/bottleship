@@ -13,6 +13,7 @@ const SFNT_OTTO = 0x4f54544f; // 'OTTO'
 const SFNT_TRUE = 0x74727565; // 'true'
 const TAG_NAME = 0x6e616d65;  // 'name'
 const TAG_OS2 = 0x4f532f32;   // 'OS/2'
+const TAG_CMAP = 0x636d6170;  // 'cmap'
 const NAME_ID_FAMILY = 1;
 const NAME_ID_FULL = 4;
 
@@ -160,6 +161,7 @@ async function loadFontResource(resolvedPath: string, data: Uint8Array): Promise
     // FontFace wants a plain ArrayBuffer; VFS data may view a SharedArrayBuffer.
     const buf = new ArrayBuffer(data.byteLength);
     new Uint8Array(buf).set(data);
+    clearUnicodeCmapLanguages(new Uint8Array(buf));
     // The file's weight and slant ride along, so a LOGFONT asking for the family in bold
     // finds the bold file, and one asking for "Andy Bold" in bold is not emboldened twice.
     // GDI matches the full name as a face of its own.
@@ -176,6 +178,28 @@ async function loadFontResource(resolvedPath: string, data: Uint8Array): Promise
     } catch (e) {
         Logger.warn(LogCategory.GDI32, `AddFontResource: FontFace load failed for "${resolvedPath}": ${e}`);
         return null;
+    }
+}
+
+/**
+ * The browser's font sanitizer (OTS) refuses a whole font whose format-4 cmap carries
+ * a language id, which only means something on the Macintosh platform and which GDI
+ * ignores. Shipping Windows fonts set it on their Windows subtable, so clear it there.
+ * OTS does not verify table checksums, so the edit needs no fix-up.
+ */
+export function clearUnicodeCmapLanguages(data: Uint8Array): void {
+    const cmap = sfntTable(data, TAG_CMAP);
+    if (!cmap || cmap + 4 > data.byteLength) return;
+    const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const count = dv.getUint16(cmap + 2);
+    for (let i = 0; i < count; i++) {
+        const rec = cmap + 4 + i * 8;
+        if (rec + 8 > data.byteLength) return;
+        const platform = dv.getUint16(rec);
+        const sub = cmap + dv.getUint32(rec + 4);
+        if ((platform === 0 || platform === 3) && sub + 6 <= data.byteLength && dv.getUint16(sub) === 4) {
+            dv.setUint16(sub + 4, 0);
+        }
     }
 }
 
