@@ -232,8 +232,9 @@ export function resolveDibSectionRectRgba(
  * selected must land there, because apps read the bits back and post-process them, and
  * because the canvas is re-materialized FROM those bits on the next SelectObject (a
  * draw that never wrote back is discarded there). Mirrors the canvas rect into 32bpp
- * bits as B,G,R, preserving the reserved/alpha byte the app owns, or into 1bpp bits as
- * MSB-first colour-table indices. No-op for the depths in between.
+ * bits as B,G,R, preserving the reserved/alpha byte the app owns; into 24bpp as B,G,R;
+ * into 16bpp through the section's colour masks; into 1bpp as MSB-first colour-table
+ * indices. No-op for the palettized depths in between.
  */
 export function writeBackDibSectionRect(
     hBitmap: number,
@@ -244,7 +245,7 @@ export function writeBackDibSectionRect(
     const obj = unwrapBitmapObj(hBitmap);
     if (!obj || !obj.bitsPtr || !obj.dibStride) return;
     const bpp = obj.dibBpp ?? 32;
-    if (bpp !== 32 && bpp !== 1) return;
+    if (bpp !== 32 && bpp !== 24 && bpp !== 16 && bpp !== 1) return;
     // Per-pixel write-back below; getCurrentMemory() hands out v86's Proxy, whose
     // per-element trap V8 cannot JIT. Nothing here re-enters the guest, so the plain
     // view cannot go stale mid-call.
@@ -263,6 +264,10 @@ export function writeBackDibSectionRect(
         writeBackMonochromeRect(obj, mem, src, cx, cy, cw, ch, bh);
         return;
     }
+    if (bpp === 16 || bpp === 24) {
+        writeBackRgbRect(obj, mem, src, cx, cy, cw, ch, bh, bpp);
+        return;
+    }
     for (let ry = 0; ry < ch; ry++) {
         const dibY = obj.dibTopDown ? cy + ry : bh - 1 - (cy + ry);
         let o = obj.bitsPtr + dibY * obj.dibStride + cx * 4;
@@ -271,6 +276,37 @@ export function writeBackDibSectionRect(
             mem[o] = src[si + 2];
             mem[o + 1] = src[si + 1];
             mem[o + 2] = src[si];
+        }
+    }
+}
+
+/** 24bpp as B,G,R; 16bpp packed through the section's masks, each channel rounded to its width. */
+function writeBackRgbRect(
+    obj: BitmapUserObj,
+    mem: Uint8Array,
+    src: Uint8ClampedArray,
+    cx: number, cy: number, cw: number, ch: number, bh: number,
+    bpp: 16 | 24,
+): void {
+    const masks = dibColorMasks(16, obj.dibMasks);
+    const channels = masks.map(maskChannel);
+    const pack = (v: number, c: MaskChannel) => (Math.round(v * c.max / 255) << c.shift) >>> 0;
+    for (let ry = 0; ry < ch; ry++) {
+        const dibY = obj.dibTopDown ? cy + ry : bh - 1 - (cy + ry);
+        let o = obj.bitsPtr! + dibY * obj.dibStride! + cx * (bpp >> 3);
+        let si = ry * cw * 4;
+        for (let rx = 0; rx < cw; rx++, si += 4) {
+            if (bpp === 24) {
+                mem[o] = src[si + 2]!;
+                mem[o + 1] = src[si + 1]!;
+                mem[o + 2] = src[si]!;
+                o += 3;
+            } else {
+                const v = pack(src[si]!, channels[0]!) | pack(src[si + 1]!, channels[1]!) | pack(src[si + 2]!, channels[2]!);
+                mem[o] = v & 0xff;
+                mem[o + 1] = (v >>> 8) & 0xff;
+                o += 2;
+            }
         }
     }
 }
