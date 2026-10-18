@@ -1858,6 +1858,12 @@ export function createPaintingExports(): Record<string, ThunkImplementation> {
             }
         }
 
+        // BI_BITFIELDS masks sit at the same offset after a BITMAPINFOHEADER as inside a
+        // BITMAPV4/V5HEADER.
+        const dibMasks = biCompression === 3 && bpp > 8 && pbmi + 52 <= mem.length
+            ? [view.getUint32(pbmi + 40, true), view.getUint32(pbmi + 44, true), view.getUint32(pbmi + 48, true)]
+            : undefined;
+
         // No RGBA shadow — Lead Tools / decoders write guest bitsPtr; resolveBitmapRgba reads it.
         const handle = SystemResourceProvider.getInstance().registerUserObject({
             type: 'BITMAP',
@@ -1872,6 +1878,7 @@ export function createPaintingExports(): Record<string, ThunkImplementation> {
             dibStride: rowStride,
             dibTopDown: biHeight < 0,
             dibPalette,
+            dibMasks,
         } as any);
 
         Logger.log(

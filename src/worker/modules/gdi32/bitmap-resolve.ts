@@ -42,6 +42,8 @@ interface BitmapUserObj {
     dibStride?: number;
     dibTopDown?: boolean;
     dibPalette?: Uint32Array;
+    /** BI_BITFIELDS red/green/blue masks; absent for BI_RGB. */
+    dibMasks?: readonly number[];
     isTopDown?: boolean;
     loading?: boolean;
     compatibleBitmap?: boolean;
@@ -63,6 +65,45 @@ export function bitmapPixelsPopulated(obj: BitmapUserObj): boolean {
 
 export function bitmapHasPixelSource(obj: BitmapUserObj): boolean {
     return bitmapPixelsPopulated(obj) || !!(obj.bitsPtr && obj.dibStride);
+}
+
+/**
+ * A DIB's red/green/blue masks: BI_BITFIELDS as the caller gave them, otherwise BI_RGB's
+ * fixed layout, which at 16 bpp is 5-5-5 (not the 5-6-5 a 16-bit display mode uses).
+ */
+export function dibColorMasks(bpp: number, masks?: readonly number[]): readonly [number, number, number] {
+    if (masks && ((masks[0]! | masks[1]! | masks[2]!) !== 0)) return [masks[0]! >>> 0, masks[1]! >>> 0, masks[2]! >>> 0];
+    return bpp === 16 ? [0x7c00, 0x03e0, 0x001f] : [0xff0000, 0x00ff00, 0x0000ff];
+}
+
+interface MaskChannel { shift: number; max: number }
+
+function maskChannel(mask: number): MaskChannel {
+    if (!mask) return { shift: 0, max: 0 };
+    let shift = 0;
+    while (!((mask >>> shift) & 1)) shift++;
+    return { shift, max: mask >>> shift };
+}
+
+/** Decodes 16-bit DIB pixels into 8-bit channels for one mask layout. */
+class Dib16Decoder {
+    private readonly r: MaskChannel;
+    private readonly g: MaskChannel;
+    private readonly b: MaskChannel;
+    constructor(private readonly masks: readonly [number, number, number]) {
+        this.r = maskChannel(masks[0]);
+        this.g = maskChannel(masks[1]);
+        this.b = maskChannel(masks[2]);
+    }
+    private static scale(v: number, mask: number, c: MaskChannel): number {
+        return c.max ? Math.round(((v & mask) >>> c.shift) * 255 / c.max) : 0;
+    }
+    write(v: number, out: Uint8ClampedArray, di: number): void {
+        out[di] = Dib16Decoder.scale(v, this.masks[0], this.r);
+        out[di + 1] = Dib16Decoder.scale(v, this.masks[1], this.g);
+        out[di + 2] = Dib16Decoder.scale(v, this.masks[2], this.b);
+        out[di + 3] = 255;
+    }
 }
 
 function unwrapBitmapObj(hBitmap: number): BitmapUserObj | null {
@@ -132,6 +173,7 @@ export function resolveDibSectionRectRgba(
     const bpp = obj.dibBpp ?? 32;
     const out = new Uint8ClampedArray(w * h * 4);
     const palette = obj.dibPalette;
+    const decoder16 = bpp === 16 ? new Dib16Decoder(dibColorMasks(16, obj.dibMasks)) : null;
     for (let row = 0; row < h; row++) {
         const srcY = obj.dibTopDown ? y + row : bh - 1 - (y + row);
         const srcRow = obj.bitsPtr + srcY * obj.dibStride;
@@ -156,12 +198,7 @@ export function resolveDibSectionRectRgba(
             }
         } else if (bpp === 16) {
             for (let c = 0; c < w; c++) {
-                const v = mem[srcRow + (x + c) * 2] | (mem[srcRow + (x + c) * 2 + 1] << 8);
-                const di = dstOff + c * 4;
-                out[di] = ((v >> 11) & 0x1F) * 255 / 31;
-                out[di + 1] = ((v >> 5) & 0x3F) * 255 / 63;
-                out[di + 2] = (v & 0x1F) * 255 / 31;
-                out[di + 3] = 255;
+                decoder16!.write(mem[srcRow + (x + c) * 2] | (mem[srcRow + (x + c) * 2 + 1] << 8), out, dstOff + c * 4);
             }
         } else if (bpp === 1) {
             for (let c = 0; c < w; c++) {
@@ -307,12 +344,14 @@ function readDibSectionRgbaGeneric(
     dibTopDown: boolean,
     dibBpp: number,
     palette?: Uint32Array,
+    masks?: readonly number[],
 ): Uint8ClampedArray | null {
     if (dibBpp === 32) {
         return readDibSectionRgba(mem, bitsPtr, w, h, dibStride, dibTopDown);
     }
     if (!bitsPtr || w <= 0 || h <= 0) return null;
     const out = new Uint8ClampedArray(w * h * 4);
+    const decoder16 = dibBpp === 16 ? new Dib16Decoder(dibColorMasks(16, masks)) : null;
     for (let y = 0; y < h; y++) {
         const srcY = dibTopDown ? y : (h - 1 - y);
         const srcRow = bitsPtr + srcY * dibStride;
@@ -328,12 +367,7 @@ function readDibSectionRgbaGeneric(
             }
         } else if (dibBpp === 16) {
             for (let x = 0; x < w; x++) {
-                const v = mem[srcRow + x * 2] | (mem[srcRow + x * 2 + 1] << 8);
-                const di = dstOff + x * 4;
-                out[di] = ((v >> 11) & 0x1F) * 255 / 31;
-                out[di + 1] = ((v >> 5) & 0x3F) * 255 / 63;
-                out[di + 2] = (v & 0x1F) * 255 / 31;
-                out[di + 3] = 255;
+                decoder16!.write(mem[srcRow + x * 2] | (mem[srcRow + x * 2 + 1] << 8), out, dstOff + x * 4);
             }
         } else if (dibBpp === 1) {
             // Monochrome DIBs are often created with no colour table at all; GDI's
@@ -393,7 +427,7 @@ export function resolveBitmapRgba(hBitmap: number, mem?: Uint8Array): ResolvedBi
     if (mem && obj.bitsPtr && obj.dibStride && !pixelsValid(obj)) {
         const bpp = obj.dibBpp ?? 32;
         const rgba = readDibSectionRgbaGeneric(
-            mem, obj.bitsPtr, w, h, obj.dibStride, !!obj.dibTopDown, bpp, obj.dibPalette,
+            mem, obj.bitsPtr, w, h, obj.dibStride, !!obj.dibTopDown, bpp, obj.dibPalette, obj.dibMasks,
         );
         if (rgba) return { data: rgba, width: w, height: h };
     }
@@ -426,7 +460,7 @@ export function resolveBitmapRgba(hBitmap: number, mem?: Uint8Array): ResolvedBi
     if (mem && obj.bitsPtr && obj.dibStride) {
         const bpp = obj.dibBpp ?? 32;
         const rgba = readDibSectionRgbaGeneric(
-            mem, obj.bitsPtr, w, h, obj.dibStride, !!obj.dibTopDown, bpp, obj.dibPalette,
+            mem, obj.bitsPtr, w, h, obj.dibStride, !!obj.dibTopDown, bpp, obj.dibPalette, obj.dibMasks,
         );
         if (rgba) return { data: rgba, width: w, height: h };
     }
