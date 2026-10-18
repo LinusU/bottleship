@@ -2,7 +2,7 @@
  * DRAWTEXTPARAMS.uiLengthDrawn: the characters of the caller's string that the lines laid
  * out consume, each line's break included. A caller that draws long text one line-high
  * rect at a time advances its string pointer by it; left at 0, only the first line of a
- * message ever shows.
+ * message ever shows. The return value is the height of those same lines.
  */
 import { afterEach, expect, test } from "bun:test";
 import { System } from "../../src/worker/core/system";
@@ -52,7 +52,7 @@ test("DT_NOCLIP lays out every line, whatever the rect", () => {
     expect(lengthDrawn("aaaa bbbb cccc", rect(10, 1), DT_WORDBREAK | DT_NOCLIP)).toBe(14);
 });
 
-test("DrawTextEx writes uiLengthDrawn, and fails a DRAWTEXTPARAMS of another size", () => {
+test("DrawTextEx writes uiLengthDrawn, returns the height of the lines it laid out, fails a DRAWTEXTPARAMS of another size", () => {
     const gdi = fakeGdi();
     (System as unknown as { instance: unknown }).instance = {
         gdiContext: { drawText: (hdc: number, text: string, r: never, f: number) => drawText(gdi, hdc, text, r, f) },
@@ -66,7 +66,7 @@ test("DrawTextEx writes uiLengthDrawn, and fails a DRAWTEXTPARAMS of another siz
     for (const [i, v] of [0, 0, 10 * CHAR_WIDTH, LINE - 1].entries()) view.setInt32(RECT + i * 4, v, true);
 
     view.setUint32(PARAMS, 20, true);
-    exports["DrawTextExA"]!(null as never, mem, [1, TEXT, -1, RECT, DT_WORDBREAK, PARAMS]);
+    expect(exports["DrawTextExA"]!(null as never, mem, [1, TEXT, -1, RECT, DT_WORDBREAK, PARAMS])).toBe(LINE);
     expect(view.getUint32(PARAMS + 16, true)).toBe(10);
 
     view.setUint32(PARAMS, 24, true);

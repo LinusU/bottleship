@@ -517,7 +517,8 @@ export function drawText(
         }
     }
     // The first line is always laid out; each later one only while it starts inside the
-    // rect, unless DT_NOCLIP (or a DT_CALCRECT measurement) lifts the bottom.
+    // rect, unless DT_NOCLIP (or a DT_CALCRECT measurement) lifts the bottom. The return
+    // value and uiLengthDrawn both count those lines.
     let laidOut = lines.length;
     if (rect && (f & (DT_NOCLIP | DT_CALCRECT)) === 0) {
         laidOut = 1;
@@ -525,7 +526,7 @@ export function drawText(
     }
     let lengthDrawn = 0;
     for (let i = 0; i < laidOut; i++) lengthDrawn += lines[i]!.consumed;
-    const layout: DrawTextLayout = { height: lines.length * advance, width: Math.ceil(maxWidth), lengthDrawn };
+    const layout: DrawTextLayout = { height: laidOut * advance, width: Math.ceil(maxWidth), lengthDrawn };
 
     // DT_CALCRECT measures only — no pixels, no dirty marking.
     if (calcOnly) return layout;
