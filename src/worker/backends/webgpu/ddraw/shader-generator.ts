@@ -178,7 +178,7 @@ const RHW_DEPTH_CLAMP_WGSL = `let clipPos = out.position;
  * lowering"), taking the whole pipeline with it. Read the position into a `let` and assign
  * the complete vec4 instead; the same discipline the D3D9 emitter uses for its registers.
  */
-/** Debug-only depth override; the MinZ/MaxZ remap itself lives in d3dTransformPosition. */
+/** Debug-only depth override; MinZ/MaxZ is the pass viewport's depth range. */
 function generateZBlock(forceZMidpoint: boolean): string {
     if (!forceZMidpoint) return "";
     return `// Debug: force Z = 0.5*w to isolate NDC/projection issues
@@ -545,7 +545,7 @@ export function generateShaderCode(config: ShaderConfig): string {
                         ${RHW_DEPTH_CLAMP_WGSL}
                     }
                 } else {
-                    out.position = d3dTransformPosition(uniforms.mvp, pos.xyz, uniforms.minZ, uniforms.maxZ);
+                    out.position = d3dTransformPosition(uniforms.mvp, pos.xyz);
                     ${zBlock}
                 }
 
@@ -850,7 +850,7 @@ export function generateMegaBatchShaderCode(config: ShaderConfig): string {
                         ${RHW_DEPTH_CLAMP_WGSL}
                     }
                 } else {
-                    out.position = d3dTransformPosition(draw.mvp, pos.xyz, draw.viewport.z, draw.viewport.w);
+                    out.position = d3dTransformPosition(draw.mvp, pos.xyz);
                     ${generateZBlock(debugFlags.forceZMidpoint)}
                 }
 

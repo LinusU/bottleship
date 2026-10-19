@@ -30,7 +30,7 @@ const D3DCAPS9_SIZE = 304;
 const CAPS_VERTEX_SHADER_VERSION = 196;
 const CAPS_PIXEL_SHADER_VERSION = 204;
 const CAPS_VS20_CAPS = 248;      // D3DVSHADERCAPS2_0 { Caps, DynamicFlowControlDepth, NumTemps, StaticFlowControlDepth }
-const CAPS_PS20_CAPS = 264;      // D3DPSHADERCAPS2_0 { …, NumInstructionSlots }
+const CAPS_PS20_CAPS = 264;      // D3DPSHADERCAPS2_0 { Caps, DynamicFlowControlDepth, NumTemps, … }
 const D3DVS20CAPS_PREDICATION = 1;
 const D3DPS20CAPS_ARBITRARYSWIZZLE = 1;
 const D3DPS20CAPS_GRADIENTINSTRUCTIONS = 2;
@@ -92,19 +92,17 @@ export function vertexShaderProfile(caps: DataView): string | null {
     }
 }
 
-/** shader.c D3DXGetPixelShaderProfile. */
+/** shader.c D3DXGetPixelShaderProfile: ps_2_a needs 22 temps and the full 2_a cap set, ps_2_b
+ *  32 temps and an unlimited texture-instruction count; the slot count and flow-control depth
+ *  are not consulted. */
 export function pixelShaderProfile(caps: DataView): string | null {
     const version = caps.getUint32(CAPS_PIXEL_SHADER_VERSION, true) & 0xffff;
     if (version >= 0x0101 && version <= 0x0104) return `ps_1_${version & 0xff}`;
     if (version === 0x0200) {
         const flags = caps.getUint32(CAPS_PS20_CAPS, true);
-        const dynamicDepth = caps.getInt32(CAPS_PS20_CAPS + 4, true);
         const temps = caps.getInt32(CAPS_PS20_CAPS + 8, true);
-        const slots = caps.getInt32(CAPS_PS20_CAPS + 16, true);
-        if (temps >= 32 && dynamicDepth === 24 && slots >= 512 && (flags & PS_2_A_CAPS) === PS_2_A_CAPS) {
-            return 'ps_2_a';
-        }
-        if (temps >= 32 && slots >= 512) return 'ps_2_b';
+        if (temps >= 22 && (flags & PS_2_A_CAPS) === PS_2_A_CAPS) return 'ps_2_a';
+        if (temps >= 32 && (flags & D3DPS20CAPS_NOTEXINSTRUCTIONLIMIT)) return 'ps_2_b';
         return 'ps_2_0';
     }
     if (version === 0x0300) return 'ps_3_0';
@@ -161,11 +159,12 @@ export function createCompileShaderExports(process: Process): Record<string, Thu
         writeAscii(dllName, D3DX_COMPILER_DLL);
         writeAscii(procName, 'D3DCompile');
 
+        // Both return NULL on failure.
         const module = yield { fn: loadLibrary, args: [dllName], tag: 'LoadLibraryA' };
-        const entry = module && module !== E_FAIL
+        const entry = module
             ? yield { fn: getProcAddress, args: [module, procName], tag: 'GetProcAddress' }
             : 0;
-        if (!entry || entry === E_FAIL) {
+        if (!entry) {
             binding.missing = true;
             Logger.error(LogCategory.D3D9,
                 `D3DXCompileShader: ${D3DX_COMPILER_DLL} could not be loaded — the DirectX runtime ` +

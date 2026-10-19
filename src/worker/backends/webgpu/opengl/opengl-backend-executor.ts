@@ -109,6 +109,7 @@ interface CachedTexture {
     wrapT: number;
     minFilter: number;
     magFilter: number;
+    internalFormat: number;
 }
 
 interface PreparedDrawData {
@@ -434,8 +435,8 @@ export class OpenGLBackendExecutor {
                     const uniformOffset = this.allocateUniformSlot();
                     if (uniformOffset < 0) break;
 
-                    const format0 = tex0 ? baseInternalFormat(input.textures.get(I[i + CI_TEX_ID0])!.internalFormat) : BaseFormat.RGBA;
-                    const format1 = tex1 ? baseInternalFormat(input.textures.get(I[i + CI_TEX_ID1])!.internalFormat) : BaseFormat.RGBA;
+                    const format0 = tex0 ? baseInternalFormat(tex0.internalFormat) : BaseFormat.RGBA;
+                    const format1 = tex1 ? baseInternalFormat(tex1.internalFormat) : BaseFormat.RGBA;
                     this.writeUniforms(queue, uniformOffset, guestW, guestH, I, F, i, f, useTex0, useTex1, format0, format1);
 
                     const stencilTest = (flags & DF_STENCIL_TEST) !== 0;
@@ -1066,6 +1067,7 @@ export class OpenGLBackendExecutor {
                 wrapT: src.wrapT,
                 minFilter: src.minFilter,
                 magFilter: src.magFilter,
+                internalFormat: src.internalFormat,
             };
             this.textureCache.set(texId, cached);
             this.bindGroupCache.clear();
@@ -1087,6 +1089,7 @@ export class OpenGLBackendExecutor {
         cached.wrapT = src.wrapT;
         cached.minFilter = src.minFilter;
         cached.magFilter = src.magFilter;
+        cached.internalFormat = src.internalFormat;
         return cached;
     }
 

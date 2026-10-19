@@ -11,11 +11,10 @@
  *
  * `m` is the D3D row-major World×View×Projection uploaded as-is (WGSL reads it column-
  * major, so `m[i]` is D3D row i) with the pixel-centre shift already folded in
- * (pixel-center.ts writeMvpWithPixelCenter). The depth remap is D3DVIEWPORT MinZ/MaxZ.
+ * (pixel-center.ts writeMvpWithPixelCenter). D3DVIEWPORT MinZ/MaxZ is not applied here:
+ * it is the pass viewport's depth range, which also covers pre-transformed vertices.
  */
 export const D3D_TRANSFORM_POSITION_WGSL = `
-fn d3dTransformPosition(m: mat4x4<f32>, p: vec3<f32>, minZ: f32, maxZ: f32) -> vec4<f32> {
-    let c = fma(m[2], vec4<f32>(p.z), fma(m[1], vec4<f32>(p.y), fma(m[0], vec4<f32>(p.x), m[3])));
-    let zNdc = c.z / c.w;
-    return vec4<f32>(c.xy, (zNdc * (maxZ - minZ) + minZ) * c.w, c.w);
+fn d3dTransformPosition(m: mat4x4<f32>, p: vec3<f32>) -> vec4<f32> {
+    return fma(m[2], vec4<f32>(p.z), fma(m[1], vec4<f32>(p.y), fma(m[0], vec4<f32>(p.x), m[3])));
 }`;

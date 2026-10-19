@@ -11,8 +11,16 @@ import {
     D3DRENDERSTATE_ALPHAREF,
     D3DRENDERSTATE_ALPHATESTENABLE,
     D3DRENDERSTATE_CULLMODE,
+    D3DRENDERSTATE_FOGCOLOR,
+    D3DRENDERSTATE_FOGDENSITY,
+    D3DRENDERSTATE_FOGENABLE,
+    D3DRENDERSTATE_FOGEND,
+    D3DRENDERSTATE_FOGSTART,
+    D3DRENDERSTATE_FOGTABLEMODE,
+    D3DRENDERSTATE_FOGVERTEXMODE,
     D3DRENDERSTATE_LIGHTING,
     D3DRENDERSTATE_NORMALIZENORMALS,
+    D3DRENDERSTATE_RANGEFOGENABLE,
     D3DRENDERSTATE_TEXTUREFACTOR,
     D3DRENDERSTATE_ZENABLE,
     D3DRENDERSTATE_ZWRITEENABLE,
@@ -42,8 +50,13 @@ import {
     compileVertexShader,
     computeCubeMask,
     PROG_BIND,
+    type CompiledPs,
     type CompiledVs,
 } from "../d3d9/shader";
+import { PS_FLOAT_REGISTER_COUNT } from "../d3d9/shader/emit/ps";
+import { SHADER_BOOLEAN_BANK_BYTES, SHADER_INTEGER_REGISTER_COUNT } from "../d3d9/shader/link/uniforms";
+import { resolveProgrammablePixelFogMode } from "../d3d9/ffp-fog";
+import type { DrawViewport } from "../d3d9/d3d9-command-recorder";
 import type { AlphaTest } from "../d3d9/shader/sm-wgsl";
 import {
     D3D_ALPHALESS_FORMATS,
@@ -60,17 +73,21 @@ import {
 } from "../d3d9/ffp-lighting";
 import { DxSamplerCache, dxSamplerShaderStatesKey, type SamplerSpec } from "../shared/dx-sampler";
 import { decodeD3d8TssSampler } from "./d3d8-sampler";
-import { sanitizeViewport } from "../ddraw/types";
-import { pixelCenterClipOffset, withPixelCenterVersion } from "../pixel-center";
-import { buildD3D8PipelineKey, D3D8ShaderRegistry } from "./d3d8-shader-registry";
+import { sanitizeViewportInto, type SanitizedViewport } from "../ddraw/types";
+import { dwordToFloat } from "../ddraw/dword-float";
+import { pixelCenterClipDx, pixelCenterClipDy, withPixelCenterVersion } from "../pixel-center";
+import { buildD3D8PipelineKey, D3D8ShaderRegistry, type D3D8VsObject } from "./d3d8-shader-registry";
 import {
     describeDeclInputs,
+    ffpProjectedMask,
+    ffpVertexFogOutput,
     ffpVertexSpecKey,
     FFP_SYNTH_CONSTANT_COUNT,
     FFP_SYNTH_MAX_TEXCOORDS,
     FFP_SYNTH_POSITION,
     isFfpVertexSpecSupported,
     synthesizeFfpVertexShader,
+    TTFF_PROJECTED,
     writeFfpVertexConstants,
     type FfpVertexSpec,
 } from "./ffp-vertex-synth";
@@ -80,8 +97,32 @@ import type { DDrawWebGPUExecutor } from "../ddraw/ddraw-backend-executor";
 /** D3DTSS_CONSTANT — not in the shared ddraw constants table; mirrors d3d9-device.ts's
  *  own local definition (same D3D8/9 TSS index numbering). */
 const D3DTSS_CONSTANT = 32;
+const D3DTSS_BUMPENVMAT00 = 7;
+const D3DTSS_BUMPENVLSCALE = 22;
+const D3DTSS_BUMPENVLOFFSET = 23;
 const D3DRENDERSTATE_VERTEXBLEND = 151;
-const D3DTS_TEXTURE0 = 16;
+
+/** The render states a synthesized fixed-function vertex stage is a function of (besides
+ *  the shader pair and each stage's TEXCOORDINDEX / TEXTURETRANSFORMFLAGS). */
+const FFP_VERTEX_RENDER_STATES = [
+    D3DRENDERSTATE_LIGHTING,
+    D3DRENDERSTATE_VERTEXBLEND,
+    D3DRENDERSTATE_NORMALIZENORMALS,
+    D3DRENDERSTATE_FOGENABLE,
+    D3DRENDERSTATE_FOGTABLEMODE,
+    D3DRENDERSTATE_FOGVERTEXMODE,
+    D3DRENDERSTATE_RANGEFOGENABLE,
+] as const;
+const FFP_VERTEX_STATE_WORDS = FFP_VERTEX_RENDER_STATES.length + FFP_SYNTH_MAX_TEXCOORDS * 2;
+
+/** A synthesized fixed-function vertex stage and the link state it implies. */
+export interface FfpVertexStage {
+    compiled: CompiledVs;
+    /** buildD3D8FfpVariantKey for this stage's link (a pixel shader is always bound). */
+    variantKey: string;
+    /** Stages whose `tex` fetch divides by .w (ps_1_1-1_3 + D3DTTFF_PROJECTED). */
+    projectedMask: number;
+}
 
 /**
  * Pipeline-cache identity of the fixed-function cascade a vertex-shader draw with NO pixel
@@ -101,6 +142,11 @@ export function buildD3D8FfpVariantKey(
     return `hs${hybridStages}:pj${projectedMask}:sm${dxSamplerShaderStatesKey(samplerStates ?? new Map())}`;
 }
 
+/** `dst[0..n) = src[0..n)` without the view a `subarray` copy allocates per draw. */
+function copyPrefix(dst: Float32Array, src: Float32Array, n: number): void {
+    for (let i = 0; i < n; i++) dst[i] = src[i]!;
+}
+
 export class D3D8ProgrammableRenderer {
     private commandRecorder = new D3D9CommandRecorder(new RenderFramePool(2));
     private backendExecutor: D3D9BackendExecutor;
@@ -112,8 +158,16 @@ export class D3D8ProgrammableRenderer {
     private readonly ffpHybridBlock = new Float32Array(FFP_UNIFORM_FLOATS);
     private readonly ffpHybridStagePool: FfpUniformParams["stages"][number][] = [];
     /** Synthesized fixed-function vertex stages, by ffpVertexSpecKey. */
-    private readonly ffpVertexShaders = new Map<string, CompiledVs>();
+    private readonly ffpVertexStages = new Map<string, FfpVertexStage>();
     private readonly ffpVertexConstants = new Float32Array(FFP_SYNTH_CONSTANT_COUNT * 4);
+    // resolveFfpVertexStage memo: the inputs of the last resolution, compared field-wise so a
+    // draw whose state has not changed resolves without allocating.
+    private readonly ffpMemoState = new Int32Array(FFP_VERTEX_STATE_WORDS);
+    private ffpMemoVs = -1;
+    private ffpMemoPs = -1;
+    private ffpMemoResult: FfpVertexStage | null = null;
+    private readonly viewportScratch: SanitizedViewport = { x: 0, y: 0, width: 0, height: 0, minZ: 0, maxZ: 1 };
+    private readonly drawViewportScratch: DrawViewport = { x: 0, y: 0, width: 0, height: 0, minZ: 0, maxZ: 1 };
 
     constructor(private backend: WebGPUBackend) {
         this.backendExecutor = new D3D9BackendExecutor(backend);
@@ -138,20 +192,53 @@ export class D3D8ProgrammableRenderer {
      * link gets that processing as synthesized vs_1_1 (ffp-vertex-synth.ts). Null when the
      * draw is not that pairing or needs fixed-function work the synthesis does not cover
      * (lighting, vertex blending); such a draw stays on the fixed-function path.
+     *
+     * Called several times per draw; the answer is memoized on the state it depends on, so
+     * only a state change pays for building the spec.
      */
-    resolveFfpVertexStage(
-        adapter: D3D8DeviceAdapter,
-        shaders: D3D8ShaderRegistry,
-    ): { compiled: CompiledVs; key: string } | null {
+    resolveFfpVertexStage(adapter: D3D8DeviceAdapter, shaders: D3D8ShaderRegistry): FfpVertexStage | null {
         const vsObj = shaders.getActiveVs();
         if (!vsObj || vsObj.compiled) return null;
         const ps = shaders.getActivePs()?.compiled;
         if (!ps) return null;
+
+        const memo = this.ffpMemoState;
+        const rs = adapter.renderStates;
+        const ts = adapter.textureStates;
+        let hit = this.ffpMemoVs === shaders.activeVsHandle && this.ffpMemoPs === shaders.activePsHandle;
+        let w = 0;
+        for (let i = 0; i < FFP_VERTEX_RENDER_STATES.length; i++, w++) {
+            const v = rs[FFP_VERTEX_RENDER_STATES[i]!]! | 0;
+            if (memo[w] !== v) { memo[w] = v; hit = false; }
+        }
+        for (let stage = 0; stage < FFP_SYNTH_MAX_TEXCOORDS; stage++) {
+            const tci = ts[stage * 32 + D3DTSS_TEXCOORDINDEX]! | 0;
+            if (memo[w] !== tci) { memo[w] = tci; hit = false; }
+            w++;
+            const ttff = ts[stage * 32 + D3DTSS_TEXTURETRANSFORMFLAGS]! | 0;
+            if (memo[w] !== ttff) { memo[w] = ttff; hit = false; }
+            w++;
+        }
+        if (hit) return this.ffpMemoResult;
+        this.ffpMemoVs = shaders.activeVsHandle;
+        this.ffpMemoPs = shaders.activePsHandle;
+        this.ffpMemoResult = this.buildFfpVertexStage(adapter, vsObj, ps);
+        return this.ffpMemoResult;
+    }
+
+    private buildFfpVertexStage(
+        adapter: D3D8DeviceAdapter,
+        vsObj: D3D8VsObject,
+        ps: CompiledPs,
+    ): FfpVertexStage | null {
         if (this.getRS(adapter, D3DRENDERSTATE_LIGHTING) !== 0) return null;
         if (this.getRS(adapter, D3DRENDERSTATE_VERTEXBLEND) !== 0) return null;
         const inputs = describeDeclInputs(vsObj.decl);
         if (!inputs.hasPosition) return null;
 
+        // D3DTTFF_PROJECTED is honoured by ps_1_1-1_3 `tex` alone; ps_1_4 and later project
+        // explicitly (texld _dw / texldp), so there the flag is not part of the coordinate.
+        const projectiveTex = ps.prog.major === 1 && !ps.analysis.isPs14;
         const outputs = new Set<number>(ps.analysis.readsTexcoord);
         for (const n of ps.analysis.samplers) outputs.add(n);
         const ts = adapter.textureStates;
@@ -163,22 +250,34 @@ export class D3D8ProgrammableRenderer {
             texcoordComponents: inputs.texcoordComponents,
             texcoords: [...outputs].filter(n => n < FFP_SYNTH_MAX_TEXCOORDS).sort((a, b) => a - b).map(n => {
                 const tci = ts[n * 32 + D3DTSS_TEXCOORDINDEX] >>> 0;
+                const ttff = ts[n * 32 + D3DTSS_TEXTURETRANSFORMFLAGS] | 0;
                 return {
                     output: n,
                     mode: tci >>> 16,
                     set: tci & 0xffff,
-                    transformFlags: ts[n * 32 + D3DTSS_TEXTURETRANSFORMFLAGS] | 0,
+                    transformFlags: projectiveTex ? ttff : ttff & ~TTFF_PROJECTED,
                 };
             }),
+            fog: ffpVertexFogOutput(
+                this.getRS(adapter, D3DRENDERSTATE_FOGENABLE),
+                this.getRS(adapter, D3DRENDERSTATE_FOGTABLEMODE),
+                this.getRS(adapter, D3DRENDERSTATE_FOGVERTEXMODE),
+            ),
+            rangeFog: this.getRS(adapter, D3DRENDERSTATE_RANGEFOGENABLE) !== 0,
         };
         if (!isFfpVertexSpecSupported(spec)) return null;
         const key = ffpVertexSpecKey(spec);
-        let compiled = this.ffpVertexShaders.get(key);
-        if (!compiled) {
-            compiled = compileVertexShader(synthesizeFfpVertexShader(spec));
-            this.ffpVertexShaders.set(key, compiled);
+        let stage = this.ffpVertexStages.get(key);
+        if (!stage) {
+            const projectedMask = ffpProjectedMask(spec);
+            stage = {
+                compiled: compileVertexShader(synthesizeFfpVertexShader(spec)),
+                variantKey: `${buildD3D8FfpVariantKey(0, projectedMask, null)}:fv${key}`,
+                projectedMask,
+            };
+            this.ffpVertexStages.set(key, stage);
         }
-        return { compiled, key };
+        return stage;
     }
 
     /**
@@ -423,7 +522,8 @@ export class D3D8ProgrammableRenderer {
         // projection come from TSS. Both change the emitted WGSL, so they belong in the key —
         // otherwise a stage-count change silently reuses the pipeline built for the old one.
         const hybridStages = ps ? 0 : this.ffpStageCount(adapter);
-        const projectedMask = hybridStages ? this.projectedStageMask(adapter, hybridStages) : 0;
+        const projectedMask = hybridStages ? this.projectedStageMask(adapter, hybridStages)
+            : (ffpVertex?.projectedMask ?? 0);
         const hybridSamplers = hybridStages ? this.ffpSamplerStates(adapter, hybridStages) : null;
         const isStrip = topology === "triangle-strip" || topology === "line-strip";
         const cacheKey = buildD3D8PipelineKey(
@@ -437,8 +537,7 @@ export class D3D8ProgrammableRenderer {
             this.blendKey(adapter),
             this.alphaTestKey(adapter),
             cubeMask,
-            buildD3D8FfpVariantKey(hybridStages, projectedMask, hybridSamplers)
-                + (ffpVertex ? `:fv${ffpVertex.key}` : ""),
+            ffpVertex ? ffpVertex.variantKey : buildD3D8FfpVariantKey(hybridStages, projectedMask, hybridSamplers),
         );
         const cached = this.progPipelineCache.get(cacheKey);
         if (cached !== undefined) return cached;
@@ -547,21 +646,26 @@ export class D3D8ProgrammableRenderer {
         // hybridStages) — same PS-uniform-binding repurposing as d3d9-device.ts's hybrid path:
         // c[0] (debug selector) + tfactor + FFP_MAX_STAGES stage records + their constants.
         const hybridStages = ps ? 0 : this.ffpStageCount(adapter);
+        // A pixel shader's block is PsUniforms (link/uniforms.ts): c#, the integer and boolean
+        // banks, the TEXBEM stage records when the shader uses them, then the fog tail.
+        const psCVecs = ps ? Math.max(1, Math.min(ps.analysis.constantCount, PS_FLOAT_REGISTER_COUNT)) : 0;
+        const psBankLen = psCVecs * 4 + SHADER_INTEGER_REGISTER_COUNT * 4 + SHADER_BOOLEAN_BANK_BYTES / 4;
+        const psBumpLen = ps?.analysis.usesLegacyBumpEnv ? FFP_MAX_STAGES * 8 : 0;
         const psLen = ps
-            ? Math.min(ps.analysis.constantCount, 224) * 4
+            ? psBankLen + psBumpLen + 8
             : 4 + 4 + FFP_MAX_STAGES * 8 + FFP_STAGE_CONSTANT_FLOATS;
 
         const frame = this.commandRecorder.getCurrentFrame();
         const index = frame.drawStateCount;
         const state = frame.nextDrawState(vsLen, psLen);
 
-        const { dx, dy } = pixelCenterClipOffset(adapter.viewport.width, adapter.viewport.height);
+        const dx = pixelCenterClipDx(adapter.viewport.width);
+        const dy = pixelCenterClipDy(adapter.viewport.height);
         if (ffpVertex) {
             const rt = adapter.activeRenderTarget;
-            writeFfpVertexConstants(this.ffpVertexConstants, adapter.getMVP(), adapter.getWorldViewMatrix(),
-                (stage) => adapter.getTransform(D3DTS_TEXTURE0 + stage),
-                sanitizeViewport(adapter.viewport, rt.width, rt.height));
-            state.vsConst.set(this.ffpVertexConstants.subarray(0, vsConstantLen));
+            const vp = sanitizeViewportInto(this.viewportScratch, adapter.viewport, rt.width, rt.height);
+            writeFfpVertexConstants(this.ffpVertexConstants, adapter, vp.width, vp.height);
+            copyPrefix(state.vsConst, this.ffpVertexConstants, vsConstantLen);
         } else {
             state.vsConst.set(shaders.vsConstants.subarray(0, vsConstantLen));
         }
@@ -575,8 +679,8 @@ export class D3D8ProgrammableRenderer {
             ? this.hashConstants(state.vsBits, vsLen)
             : withPixelCenterVersion(shaders.vsConstantsVersion, dx, dy);
         if (ps) {
-            state.psConst.set(shaders.psConstants.subarray(0, psLen));
-            state.psVersion = shaders.psConstantsVersion;
+            this.packPixelShaderBlock(adapter, shaders, ps, state.psConst, psCVecs, psBankLen, psLen);
+            state.psVersion = this.hashConstants(state.psBits, psLen);
         } else {
             this.packFfpHybridPixelState(adapter, hybridStages, this.ffpHybridBlock);
             state.psConst.fill(0, 0, psLen);
@@ -618,6 +722,65 @@ export class D3D8ProgrammableRenderer {
         }
         state.sampler = state.samplers[0];
         return index;
+    }
+
+    /**
+     * The PsUniforms block for a guest pixel shader. ps_1_x reads only c#; the integer and
+     * boolean banks stay zero. Fog follows the pixel shader as fixed-function work (ps < 3.0):
+     * table fog from depth, otherwise the interpolated oFog.
+     */
+    private packPixelShaderBlock(
+        adapter: D3D8DeviceAdapter,
+        shaders: D3D8ShaderRegistry,
+        ps: CompiledPs,
+        out: Float32Array,
+        cVecs: number,
+        bankLen: number,
+        len: number,
+    ): void {
+        out.fill(0, 0, len);
+        copyPrefix(out, shaders.psConstants, Math.min(cVecs * 4, shaders.psConstants.length));
+        const ts = adapter.textureStates;
+        if (ps.analysis.usesLegacyBumpEnv) {
+            // LegacyBumpStage { mat: (M00, M01, M10, M11), lum: (scale, offset, 0, 0) }.
+            for (let stage = 0; stage < FFP_MAX_STAGES; stage++) {
+                const at = bankLen + stage * 8;
+                const base = stage * 32;
+                for (let k = 0; k < 4; k++) out[at + k] = dwordToFloat(ts[base + D3DTSS_BUMPENVMAT00 + k]! | 0);
+                out[at + 4] = dwordToFloat(ts[base + D3DTSS_BUMPENVLSCALE]! | 0);
+                out[at + 5] = dwordToFloat(ts[base + D3DTSS_BUMPENVLOFFSET]! | 0);
+            }
+        }
+        const fogAt = len - 8;
+        const fogColor = this.getRS(adapter, D3DRENDERSTATE_FOGCOLOR) >>> 0;
+        out[fogAt + 0] = ((fogColor >>> 16) & 0xff) / 255;
+        out[fogAt + 1] = ((fogColor >>> 8) & 0xff) / 255;
+        out[fogAt + 2] = (fogColor & 0xff) / 255;
+        out[fogAt + 3] = 1;
+        out[fogAt + 4] = dwordToFloat(this.getRS(adapter, D3DRENDERSTATE_FOGSTART));
+        out[fogAt + 5] = dwordToFloat(this.getRS(adapter, D3DRENDERSTATE_FOGEND));
+        out[fogAt + 6] = dwordToFloat(this.getRS(adapter, D3DRENDERSTATE_FOGDENSITY));
+        out[fogAt + 7] = ps.prog.major < 3
+            ? resolveProgrammablePixelFogMode(
+                this.getRS(adapter, D3DRENDERSTATE_FOGENABLE),
+                this.getRS(adapter, D3DRENDERSTATE_FOGTABLEMODE),
+            )
+            : 0;
+    }
+
+    /**
+     * The D3D viewport a programmable draw rasterizes into: its rect, and MinZ/MaxZ as the
+     * pass depth range — the one place the depth remap happens, for guest and synthesized
+     * vertex stages alike, as on the fixed-function path. Returns reused storage; the
+     * recorder copies it.
+     */
+    drawViewport(adapter: D3D8DeviceAdapter): DrawViewport {
+        const rt = adapter.activeRenderTarget;
+        const vp = sanitizeViewportInto(this.viewportScratch, adapter.viewport, rt.width, rt.height);
+        const out = this.drawViewportScratch;
+        out.x = vp.x; out.y = vp.y; out.width = vp.width; out.height = vp.height;
+        out.minZ = vp.minZ; out.maxZ = vp.maxZ;
+        return out;
     }
 
     flush(adapter: D3D8DeviceAdapter): void {

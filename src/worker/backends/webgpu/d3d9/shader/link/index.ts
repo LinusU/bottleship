@@ -219,9 +219,9 @@ export interface LinkOptions {
     /** `vs` is SYNTHESIZED fixed-function vertex processing (a D3D8 declaration-only vertex
      *  shader paired with a pixel shader). Its position is not the bytecode's oPos but the
      *  fixed-function transform itself — d3dTransformPosition over c[matrixSlot..+3] (D3D
-     *  rows, pixel centre folded in) and c[depthRangeSlot].zw (MinZ, MaxZ) — so it is
-     *  bit-identical to a fixed-function pass over the same vertices. */
-    fixedFunctionPosition?: { inputRegister: number; matrixSlot: number; depthRangeSlot: number } | null;
+     *  rows, pixel centre folded in) — so it is bit-identical to a fixed-function pass over
+     *  the same vertices. */
+    fixedFunctionPosition?: { inputRegister: number; matrixSlot: number } | null;
 }
 
 /** WGSL locations for the pre-transformed passthrough vertex stage. Fixed, because there is
@@ -681,13 +681,13 @@ export function linkProgram(opts: LinkOptions): LinkResult {
 
     let fixedFunctionPosition: ((vsc: string) => string) | undefined;
     if (opts.fixedFunctionPosition && !preTransformed) {
-        const { inputRegister, matrixSlot: m, depthRangeSlot: d } = opts.fixedFunctionPosition;
+        const { inputRegister, matrixSlot: m } = opts.fixedFunctionPosition;
         const position = inputExprs.get(inputRegister) ?? "vec4<f32>(0.0, 0.0, 0.0, 1.0)";
         emitter.line(D3D_TRANSFORM_POSITION_WGSL);
         emitter.line("");
         fixedFunctionPosition = (vsc) =>
             `d3dTransformPosition(mat4x4<f32>(${vsc}.c[${m}], ${vsc}.c[${m + 1}], ${vsc}.c[${m + 2}], ${vsc}.c[${m + 3}]), `
-            + `(${position}).xyz, ${vsc}.c[${d}].z, ${vsc}.c[${d}].w)`;
+            + `(${position}).xyz)`;
     }
 
     emitter.line(preTransformed
