@@ -4,6 +4,8 @@ import { Process } from './process';
 
 export interface IModule {
     name: string;
+    /** Further DLL names whose imports these exports answer (versions of one library). */
+    aliases?: readonly string[];
     exports: Record<string, ThunkImplementation>;
     initialize(process: Process): void;
     reset?(): void;

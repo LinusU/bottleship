@@ -2826,7 +2826,7 @@ const initV86 = async (canvas: OffscreenCanvas) => {
       process.dispatcher.registerModule(netapi32.name, netapi32.exports);
       process.dispatcher.registerModule(imagehlp.name, imagehlp.exports);
       process.dispatcher.registerModule(dbghelp.name, dbghelp.exports);
-      process.dispatcher.registerModule(ifc20.name, ifc20.exports);
+      for (const dll of [ifc20.name, ...ifc20.aliases]) process.dispatcher.registerModule(dll, ifc20.exports);
       process.dispatcher.registerModule(gdiplus.name, gdiplus.exports);
       process.dispatcher.registerModule(bass.name, bass.exports);
       process.dispatcher.registerModule(galaxy.name, galaxy.exports);

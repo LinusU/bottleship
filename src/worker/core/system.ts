@@ -1064,7 +1064,9 @@ export class System {
 
                 // Re-register module exports in dispatcher (since dispatcher was reset)
                 if (module && module.exports) {
-                    this.process.dispatcher.registerModule(module.name, module.exports);
+                    for (const dll of [module.name, ...(module.aliases ?? [])]) {
+                        this.process.dispatcher.registerModule(dll, module.exports);
+                    }
                 }
             }
         }
