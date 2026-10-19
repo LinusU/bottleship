@@ -121,6 +121,15 @@ export function registerCrtMbExports(exports: Record<string, ThunkImplementation
         return chr(ptr, 0) === 0 ? 0 : 1;
     };
 
+    // Characters, not bytes; with one byte per character that is strlen.
+    exports["_mbstrlen"] = (_c, _m, a) => {
+        const ptr = a[0] ?? 0;
+        if (!ptr) return 0;
+        let n = 0;
+        while (n < 0x7fffffff && chr(ptr, n) !== 0) n++;
+        return n;
+    };
+
     exports["_mbsrev"] = (_c, _m, a) => {
         const ptr = a[0] ?? 0;
         if (!ptr) return 0;

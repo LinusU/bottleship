@@ -63,6 +63,8 @@ interface ZipEntry {
     size: number;
     /** Offset of the Local File Header in the archive */
     lfhOffset: number;
+    /** Packed DOS `date << 16 | time` from the central directory. */
+    dosStamp: number;
 }
 
 /** Locate the central directory, following the ZIP64 locator when the EOCD fields are sentinels. */
@@ -132,7 +134,7 @@ function parseCentralDir(fd: number, fileSize: number): ZipEntry[] {
             }
         }
 
-        entries.push({ name, compression, crc, compressedSize, size, lfhOffset });
+        entries.push({ name, compression, crc, compressedSize, size, lfhOffset, dosStamp: cd.readUInt32LE(pos + 12) });
         pos += 46 + nameLen + extraLen + commentLen;
     }
     return entries;
@@ -204,9 +206,9 @@ function rebuildStreaming(
                 cd.push({ nameBuf, size: override.length, crc, offset: entryOffset });
             } else if (copyFrom) {
                 // Copy the existing Store entry verbatim (reuse its CRC; stream the data).
-                writeAt(lfhFor(nameBuf, copyFrom.size, copyFrom.crc));
+                writeAt(lfhFor(nameBuf, copyFrom.size, copyFrom.crc, copyFrom.dosStamp));
                 streamStoreData(srcFd, copyFrom, (chunk) => { writeSync(outFd, chunk, 0, chunk.length); offset += chunk.length; });
-                cd.push({ nameBuf, size: copyFrom.size, crc: copyFrom.crc, offset: entryOffset });
+                cd.push({ nameBuf, size: copyFrom.size, crc: copyFrom.crc, offset: entryOffset, dosStamp: copyFrom.dosStamp });
             }
         };
 

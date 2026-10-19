@@ -194,6 +194,9 @@ export interface VsEmitOptions {
     constantCount: number;
     /** Hidden c[] slot carrying runtime pixel-centre dx/dy. */
     pixelCentreSlot?: number;
+    /** Replaces oPos + pixel-centre correction as the clip position (LinkOptions
+     *  fixedFunctionPosition); receives the constant-bank accessor in use. */
+    positionOverride?: (vsc: string) => string;
     /** Hidden c[] slot carrying D3DRS_POINTSIZE, POINTSIZE_MIN and POINTSIZE_MAX. */
     pointSizeSlot?: number;
     /** Census to record this emit's opcode dispositions into. Passing one is how a caller
@@ -514,7 +517,7 @@ export function emitVsMain(prog: SmProgram, a: VsAnalysis, opts: VsEmitOptions):
         + `${positionLane(0)} + ${positionLane(3)} * ${vsc}.c[${pixelCentreSlot}].x, `
         + `${positionLane(1)} + ${positionLane(3)} * ${vsc}.c[${pixelCentreSlot}].y, `
         + `${positionLane(2)}, ${positionLane(3)})`;
-    body.line(`out.pos = ${correctedPosition};`);
+    body.line(`out.pos = ${opts.positionOverride ? opts.positionOverride(vsc) : correctedPosition};`);
     if (opts.clipPlanes) body.line(`let _clipBasePos = out.pos;`);
     if (opts.pointExpansion) {
         // The CPU expansion duplicates each source point six times in triangle-list order
