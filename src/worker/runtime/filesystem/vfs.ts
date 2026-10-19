@@ -17,7 +17,7 @@ export interface VfsEntry {
     kind: VfsEntryKind;
     size: number;
     source: "rom" | "overlay";
-    /** Last-write time (Unix seconds) the ROM entry records; absent when storage has none. */
+    /** Last-write time the ROM entry records, as DOS wall-clock seconds (see file-time.ts); absent when storage has none. */
     modified?: number;
 }
 

@@ -1,7 +1,7 @@
 import { asBlobPart } from "../dom-buffer";
 import { inflateRawSync as inflateRawInto } from './inflate';
 import { dosDateTimeToUnix } from './dos-time';
-export { dosDateTimeToUnix, unixToDosDateTime } from './dos-time';
+export { dosDateTimeToUnix, unixToDosDateTime, wallClockToInstant, instantToWallClock } from './dos-time';
 
 // Synchronous inflate — usable where DecompressionStream is not (guest traps).
 export { adler32, inflateRawSync, inflateZlibSync } from "./inflate";
@@ -75,7 +75,7 @@ export interface ZipEntry {
     compression: number;
     localHeaderOffset: number;
     isDirectory: boolean;
-    /** Last-modified time (Unix seconds) from the DOS stamp; absent when the entry has none. */
+    /** Last-modified time from the DOS stamp, as wall-clock seconds (zip/dos-time.ts); absent when the entry has none. */
     modified?: number;
 }
 

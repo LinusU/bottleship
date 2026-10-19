@@ -77,7 +77,7 @@ export interface ContainerExtractOptions {
 
 export interface ContainerExtractResult {
     gameFiles: Map<string, Uint8Array>;
-    /** Last-write times (Unix seconds) by `gameFiles` key, for formats that record them. */
+    /** Last-write times (wall-clock seconds, see formats zip/dos-time.ts) by `gameFiles` key, for formats that record them. */
     fileTimes?: Map<string, number>;
     via: InstallerVia;
     /** Human-readable summary (e.g. "InstallShield cabinet 'data'", "no installer — packaged as-is"). */

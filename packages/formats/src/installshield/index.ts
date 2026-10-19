@@ -50,15 +50,17 @@ function isRuntimeFileGroup(name: string): boolean {
     return name.startsWith("<"); // <Support>…, <Engine>…, <Disk1>…
 }
 
+/** Destinations rooted at the install directory; the variable's case is not significant. */
+const TARGETDIR_ROOT = /^<TARGETDIR>/i;
+
 /**
  * Resolve a raw InstallShield destination string to a relative install dir:
  * strip a leading `<TARGETDIR>\` or `..\`, convert `\`→`/`, drop a leading slash.
  * `<TARGETDIR>` / `..` / "" → "" (root).
  */
 export function resolveInstallDestination(dest: string): string {
-    let s = dest;
     // strip leading <TARGETDIR> (with or without a following separator)
-    if (s.startsWith("<TARGETDIR>")) s = s.slice("<TARGETDIR>".length);
+    let s = dest.replace(TARGETDIR_ROOT, "");
     // strip any number of leading `..\` / `../` (parent-relative to install root)
     while (s.startsWith("..\\") || s.startsWith("../")) s = s.slice(3);
     if (s === "..") s = "";
@@ -82,7 +84,7 @@ export interface InstallShieldFile {
     linkPrev: number;
     linkNext: number;
     linkFlags: number;
-    /** Last-write time (Unix seconds) from the v6+ descriptor's DOS stamp; absent for v5. */
+    /** Last-write time from the v6+ descriptor's DOS stamp, as wall-clock seconds (zip/dos-time.ts); absent for v5 or an invalid stamp. */
     modified?: number;
 }
 
@@ -130,9 +132,9 @@ export interface InstallShieldInfo {
      */
     installDirByIndex: Map<number, string | null>;
     /**
-     * file-index → install dir from its FILE GROUP's `<TARGETDIR>`-rooted destination.
-     * Since IS6 the destination lives on the file group and a file's cabinet directory
-     * is a subfolder beneath it, so this is authoritative whenever present.
+     * file-index → install dir from its FILE GROUP's `<TARGETDIR>`-rooted destination
+     * (v6+). The cabinet directory of a file is the subfolder of the group's source
+     * folder, so the install path is always `destination/cabinet dir/name`.
      */
     groupDirByIndex: Map<number, string>;
     /**
@@ -187,7 +189,7 @@ export interface ExtractOptions {
         fd: InstallShieldFile,
         outPath: string,
     ) => Promise<Uint8Array | null> | Uint8Array | null;
-    /** Receives each extracted file's last-write time (Unix seconds), keyed like the result. */
+    /** Receives each extracted file's last-write time (wall-clock seconds), keyed like the result. */
     fileTimes?: Map<string, number>;
 }
 
@@ -414,7 +416,7 @@ function parseComponentLayout(
                     const fg: InstallShieldFileGroup = { name, firstFile: first, lastFile: last, destination };
                     fileGroups.push(fg);
                     // Other roots (<WINSYSDIR>, <SUPPORTDIR>, …) are outside the install tree.
-                    if (/^<TARGETDIR>/i.test(destination) && !isRuntimeFileGroup(name)) {
+                    if (TARGETDIR_ROOT.test(destination) && !isRuntimeFileGroup(name)) {
                         const dir = resolveInstallDestination(destination);
                         const lo = Math.max(0, first), hi = Math.min(fileCount - 1, last);
                         for (let idx = lo; idx <= hi; idx++) if (!groupDirByIndex.has(idx)) groupDirByIndex.set(idx, dir);
@@ -664,14 +666,22 @@ export function fileRelPath(fd: InstallShieldFile): string {
 }
 
 /**
- * Resolve the install-relative output path for a file, preferring the
- * component→destination mapping over the cabinet `directory_index`.
+ * Resolve the install-relative output path (forward slashes) for a file.
  *
  * Returns `null` when the file belongs to an InstallShield runtime group
  * (`<Support>`/`<Engine>`/`<Disk1>` — isrt.dll, ikernel.exe, setup.inx, …) and
  * must be skipped.
  *
- * Policy: the component map only WINS for a FLAT cabinet — one whose per-file
+ * A v6+ file group with a `<TARGETDIR>`-rooted destination places its files at
+ * `destination/cabinet dir/name`, as the engine does: the cabinet directory is
+ * relative to the group, never to the install root. That holds even when the two
+ * repeat a name — a real HP2 install has `help/help/*` from group `<TARGETDIR>\help`
+ * with cabinet dir `help`. Installers whose cabinet dirs are install-root paths
+ * give their groups the destination `<TARGETDIR>` (Max Payne: the Levels group,
+ * so x_level*.ras stays at the root), which the composition leaves unchanged.
+ * Groups bound elsewhere (`<WINSYSDIR>`, …) and v5 headers use the component policy:
+ *
+ * The component map only WINS for a FLAT cabinet — one whose per-file
  * directory table carries no layout for the game files (`info.cabinetIsFlat`).
  * That routes flat installers (HP1 demo — every file in cabinet dir "") into
  * System/, Maps/, Textures/, … from the component destinations, while installers
@@ -686,14 +696,15 @@ export function fileRelPath(fd: InstallShieldFile): string {
 export function resolveInstallPath(fd: InstallShieldFile, info: InstallShieldInfo): string | null {
     const mapped = info.installDirByIndex.get(fd.index);
     if (mapped === null) return null; // runtime/scaffolding file → skip
+    const rel = fileRelPath(fd).replace(/\\/g, "/");
     const groupDir = info.groupDirByIndex.get(fd.index);
-    if (groupDir !== undefined) return (groupDir ? groupDir + "/" : "") + fileRelPath(fd);
+    if (groupDir !== undefined) return groupDir ? `${groupDir}/${rel}` : rel;
     if (mapped !== undefined && !fd.dir && info.cabinetIsFlat) {
         // flat cabinet (no per-file layout) + a component destination → place by destination.
         return mapped ? `${mapped}/${fd.name}` : fd.name;
     }
     // real cabinet directory present (or no component info) → cabinet layout.
-    return fileRelPath(fd);
+    return rel;
 }
 
 /**

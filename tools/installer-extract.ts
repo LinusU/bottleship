@@ -5,7 +5,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { inflateRawSync } from 'node:zlib';
 import { extractInstallerFromFiles } from '@bottleship/repack/container-extract';
-import { unzipToMap } from '@bottleship/formats/zip';
+import { unzipToMap, wallClockToInstant } from '@bottleship/formats/zip';
 import { resolveArchiveExtractPath } from './internal/archive-extract-path';
 
 const args = process.argv.slice(2);
@@ -45,9 +45,9 @@ if (!list) {
         mkdirSync(e.directory ? e.path : dirname(e.path), { recursive: true });
         if (e.directory) continue;
         writeFileSync(e.path, e.data, { flag: 'wx' });
-        // make-wgb packs the mtime, and a game may check its files' dates.
-        const t = result.fileTimes?.get(e.name);
-        if (t !== undefined) utimesSync(e.path, t, t);
+        // `make-wgb --file-times` packs the mtime, and a game may check its files' dates.
+        const wall = result.fileTimes?.get(e.name);
+        if (wall !== undefined) { const t = wallClockToInstant(wall); utimesSync(e.path, t, t); }
     }
 } else {
     for (const e of entries) console.log(`${e.directory ? '<DIR>' : e.data.length}\t${e.name}`);

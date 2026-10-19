@@ -129,18 +129,19 @@ export class ZipStoreWriter {
     }
 
     /**
-     * Add a member streamed from a file, stamped with its mtime (games read file dates). The
-     * header declares the size we measured, so a short read is fatal: writing fewer bytes than
-     * the LFH announces desynchronizes every reader that trusts it, and the archive would still
-     * look well-formed.
+     * Add a member streamed from a file. `modified` (wall-clock seconds, zip/dos-time.ts) is
+     * stamped only when the caller knows the file's real date; otherwise the entry carries no
+     * date, so a bundle does not depend on when its files were extracted. The header declares
+     * the size we measured, so a short read is fatal: writing fewer bytes than the LFH
+     * announces desynchronizes every reader that trusts it, and the archive would still look
+     * well-formed.
      */
-    addFile(name: string, path: string): void {
+    addFile(name: string, path: string, modified?: number): void {
         const nameBuf = Buffer.from(name, "utf8");
         const src = openSync(path, "r");
         try {
-            const st = fstatSync(src, { bigint: true });
-            const size = Number(st.size);
-            const dosStamp = unixToDosDateTime(Number(st.mtimeMs) / 1000);
+            const size = Number(fstatSync(src, { bigint: true }).size);
+            const dosStamp = modified === undefined ? 0 : unixToDosDateTime(modified);
             const entryOffset = this.offset;
             // The LFH carries the CRC, so hash first, then write. Two passes over the file is
             // the price of a Store entry without a data descriptor.

@@ -1848,42 +1848,22 @@ const fileIoModule = (() => {
     // _hread - the Win16 "huge" read; identical to _lread on Win32.
     exports['_hread'] = (ctx, mem, args) => exports['_lread']!(ctx, mem, args);
 
-    // _hwrite - returns the bytes written; a zero count truncates the file at the cursor.
+    // _hwrite - WriteFile returning the count (HFILE_ERROR on failure); a zero count is
+    // SetEndOfFile at the cursor. Both results drop the callee's stdcall cleanup for ours.
     exports['_hwrite'] = (ctx, mem, args) => {
         const hFile = args[0];
         const lpBuffer = args[1];
         const count = args[2] >>> 0;
+        const asHfile = (res: number | ThunkResult) => ((typeof res === 'number' ? res : res.value) ? count : HFILE_ERROR);
+        const delegate = (r: ReturnType<ThunkImplementation>) =>
+            r instanceof Promise ? r.then(res => ({ value: asHfile(res) })) : asHfile(r);
 
-        const fileHandle = System.getInstance().resourceProvider.getFileHandle(hFile);
-        const vfsHandle = (fileHandle as FileHandleWrapper | undefined)?.vfsHandle;
-        if (!fileHandle || !vfsHandle) {
-            System.getInstance().scheduler.setLastError(ERROR_INVALID_HANDLE);
-            return HFILE_ERROR;
-        }
-        const vfs = System.getInstance().fileSystem;
-
-        if (count === 0) {
-            return vfs.truncateAt(vfsHandle.path, vfsHandle.position ?? 0)
-                .then(() => ({ value: 0 }))
-                .catch(() => {
-                    System.getInstance().scheduler.setLastError(ERROR_ACCESS_DENIED);
-                    return { value: HFILE_ERROR };
-                });
-        }
+        if (count === 0) return delegate(exports['SetEndOfFile']!(ctx, mem, [hFile]));
         if (!lpBuffer || lpBuffer + count > mem.length) {
             System.getInstance().scheduler.setLastError(ERROR_NOACCESS);
             return HFILE_ERROR;
         }
-
-        const data = mem.slice(lpBuffer, lpBuffer + count);
-        const syncWritten = vfs.writeSync(vfsHandle, data);
-        if (syncWritten >= 0) return syncWritten;
-        return fileHandle.write(data).then(
-            (written: number) => ({ value: written }),
-            () => {
-                System.getInstance().scheduler.setLastError(ERROR_IO_DEVICE);
-                return { value: HFILE_ERROR };
-            });
+        return delegate(exports['WriteFile']!(ctx, mem, [hFile, lpBuffer, count, 0, 0]));
     };
 
     // _lwrite - the UINT-count form of _hwrite.

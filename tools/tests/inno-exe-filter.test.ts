@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
     createExeDecoder, InnoExeDecoder4108, InnoExeDecoder5200, type InnoExeDecoder,
 } from "../../packages/formats/src/inno/exe-filter";
-import { InnoVersion, INNO_VERSION } from "../../packages/formats/src/inno/version";
+import { InnoVersion, INNO_VERSION, assertSupportedVersion, parseVersionString } from "../../packages/formats/src/inno/version";
 
 /** Inno's pre-5.2.0 encoder: an E8/E9 operand is stored as rel + (offset of the opcode + 5). */
 function encode4108(code: Uint8Array): Uint8Array {
@@ -44,5 +44,12 @@ describe("Inno call/jmp filter", () => {
         expect(createExeDecoder(new InnoVersion(INNO_VERSION(5, 1, 10)))).toBeInstanceOf(InnoExeDecoder4108);
         expect(createExeDecoder(new InnoVersion(INNO_VERSION(5, 2, 0)))).toBeInstanceOf(InnoExeDecoder5200);
         expect(createExeDecoder(new InnoVersion(INNO_VERSION(5, 3, 9)))).toBeInstanceOf(InnoExeDecoder5200);
+    });
+
+    test("5.1 setup data is accepted and 5.0 is not", () => {
+        const header = (s: string) => { const b = new Uint8Array(64); b.set(new TextEncoder().encode(s)); return b; };
+        expect(() => assertSupportedVersion(parseVersionString(header("Inno Setup Setup Data (5.1.0)")))).not.toThrow();
+        expect(() => assertSupportedVersion(parseVersionString(header("Inno Setup Setup Data (5.1.13)")))).not.toThrow();
+        expect(() => assertSupportedVersion(parseVersionString(header("Inno Setup Setup Data (5.0.8)")))).toThrow();
     });
 });
