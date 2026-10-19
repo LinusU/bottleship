@@ -499,5 +499,16 @@
     "year": "2000",
     "genre": "Arcade Racing",
     "enabled": true
+    },
+  {
+    "id": "crimson-skies-demo",
+    "name": "Crimson Skies",
+    "subtitle": "Demo",
+    "wgbUrl": "/apps/crimson-skies-demo.wgb",
+    "coverUrl": "/covers/crimson-skies-box.jpg",
+    "description": "Fly Nathan Zachary's Fortune Hunters over Hawaii in search of Sir Francis Drake's treasure in the original Microsoft trial.",
+    "year": "2000",
+    "genre": "Arcade Flight",
+    "enabled": true
   }
 ]
