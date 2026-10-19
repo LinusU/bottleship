@@ -85,6 +85,19 @@ describe("system control class procedure A/W faces", () => {
         expect(windows.get(HWND)!.wndProcSubclassed).toBe(true);
     });
 
+    test("un-subclassing with the W class procedure restores the un-subclassed control", () => {
+        const user32 = api();
+        const old = user32.SetWindowLongW({}, new Uint8Array(), [HWND, GWL_WNDPROC, GUEST_SUBCLASS_PROC]);
+        expect(user32.SetWindowLongW({}, new Uint8Array(), [HWND, GWL_WNDPROC, old])).toBe(GUEST_SUBCLASS_PROC);
+        const win = windows.get(HWND)!;
+        // Stored as the one class proc, so identity checks see the default procedure and
+        // its messages are not round-tripped through the guest or read as wide.
+        expect(win.wndProc).toBe(DEF_WINDOW_PROC_A);
+        expect(win.wndProcSubclassed).toBe(false);
+        expect(user32.GetWindowLongW({}, new Uint8Array(), [HWND, GWL_WNDPROC])).toBe(DEF_WINDOW_PROC_W);
+        expect(user32.GetWindowLongA({}, new Uint8Array(), [HWND, GWL_WNDPROC])).toBe(DEF_WINDOW_PROC_A);
+    });
+
     test("SetWindowLongA subclassing keeps handing back the A class procedure", () => {
         const user32 = api();
         const prev = user32.SetWindowLongA({}, new Uint8Array(), [HWND, GWL_WNDPROC, GUEST_SUBCLASS_PROC]);

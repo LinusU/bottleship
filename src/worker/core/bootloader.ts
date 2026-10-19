@@ -118,7 +118,8 @@ export function createBootloader(
     // {hModule, entry} table that sits after the fault handlers: the code above must fit in
     // the 510 bytes before the boot signature and GDT, and an unrolled call per DLL does not
     // once a title links a dozen. lpReserved is non-NULL because these are static loads.
-    // DllMain is stdcall (callee cleans 12 bytes) and preserves ESI, the table cursor.
+    // DllMain is stdcall (callee cleans 12 bytes). ESI, the table cursor, is saved across the
+    // call rather than trusted to the callee-saved convention a hand-written entry may break.
     code.push(0xbe);                         // MOV ESI, dllTable
     const dllTablePos = code.length;
     code.push(0x00, 0x00, 0x00, 0x00);
@@ -127,10 +128,12 @@ export function createBootloader(
     code.push(0x85, 0xc0);                   // TEST EAX, EAX
     code.push(0x74, 0x00);                   // JZ done
     const dllDoneJz = code.length - 1;
+    code.push(0x56);                         // PUSH ESI
     code.push(0x6a, 0x01);                   // PUSH 1 (lpReserved)
     code.push(0x6a, 0x01);                   // PUSH 1 (DLL_PROCESS_ATTACH)
     code.push(0xff, 0x36);                   // PUSH DWORD [ESI] (hModule)
     code.push(0xff, 0xd0);                   // CALL EAX
+    code.push(0x5e);                         // POP ESI
     // (F1) DEBUG: OUT 0xB077, 0xDEAD000A "DllMain result"
     code.push(0x89, 0xc1);                   // MOV ECX, EAX (Save result in ECX)
     code.push(0xb8, 0x0a, 0x00, 0xad, 0xde); // MOV EAX, 0xDEAD000A

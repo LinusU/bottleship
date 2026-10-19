@@ -2639,7 +2639,7 @@ export class ThunkDispatcher {
         this.fillStackArgs(espAtEntry, argCount);
 
         const allowStubPoolRet = this.wndProcThunkFlags[functionId] !== 0
-            || isDefaultWindowProcThunk(thunkName);
+            || isDefaultWindowProcThunk(thunkName) || this.isDirectCallEntry(functionId, espAtEntry);
         if (!this.validateReturnAddrFast(espAtEntry, allowStubPoolRet)) {
             this._slowPathInvalidReturnPreCall(functionId, thunkName, espAtEntry, cpu);
             if (profileThunk) profiler.endAsync(thunkName);
@@ -2851,6 +2851,21 @@ export class ThunkDispatcher {
         if (id < 0 || id >= MAX_THUNK_ID) return false;
         this.wndProcThunkFlags[id] = 1;
         return true;
+    }
+
+    /**
+     * An API stub called directly by a guest routine (LoadLibraryA, an HLE COM method) is
+     * entered with that invocation's callback return stub at [ESP]. Allowed only while that
+     * invocation is in flight and targets this very stub, so a desync check for the same
+     * API from ordinary guest code stays strict.
+     */
+    private isDirectCallEntry(functionId: number, esp: number): boolean {
+        if (this.callbackStubPoolBase === 0 || esp < 0 || esp + 4 > this.memLength || !this.cachedDataView) return false;
+        let retAddr: number;
+        try { retAddr = this.cachedDataView.getUint32(esp, true); } catch { return false; }
+        if (retAddr < this.callbackStubPoolBase || retAddr >= this.callbackStubPoolEnd) return false;
+        const target = this._callbackManager?.getDirectCallTarget(retAddr) ?? 0;
+        return target !== 0 && this.thunkGenerator.getStubByAddress(target)?.functionId === functionId;
     }
 
     private validateReturnAddrFast(esp: number, allowStubPoolRet = false): boolean {
@@ -3183,7 +3198,8 @@ export class ThunkDispatcher {
         if (typeof result === 'number') {
             reg32[0] = result >>> 0;
             this.winApiRing.recordReturnValue(result >>> 0); // crash-diagnosis ring
-            const allowStub = this.wndProcThunkFlags[id] !== 0 || isDefaultWindowProcThunk(name);
+            const allowStub = this.wndProcThunkFlags[id] !== 0 || isDefaultWindowProcThunk(name)
+                || this.isDirectCallEntry(id, espAtEntry);
             if (!this.validateReturnAddrFast(espAtEntry, allowStub)) {
                 this._slowPathInvalidReturn(id, name, espAtEntry, result, cpu);
                 this.boundaryKind = ThunkBoundaryKind.THUNK_STUB;
@@ -3235,7 +3251,8 @@ export class ThunkDispatcher {
         this.winApiRing.recordReturnValue(thunkRes.value >>> 0); // crash-diagnosis ring
 
         const mem8 = this.cachedMem8;
-        const allowStubSync = this.wndProcThunkFlags[id] !== 0 || isDefaultWindowProcThunk(name);
+        const allowStubSync = this.wndProcThunkFlags[id] !== 0 || isDefaultWindowProcThunk(name)
+            || this.isDirectCallEntry(id, espAtEntry);
         // Skip return address validation for SEH/callback thunks � ESP was moved to catch frame
         if (mem8 && !skipStackCheck && !this.validateReturnAddr(mem8, espAtEntry, `Sync thunk ${name}`, allowStubSync)) {
             Logger.error(LogCategory.THUNK,
@@ -3992,8 +4009,11 @@ export class ThunkDispatcher {
                         return false;
                     }
                 };
-                System.getInstance().scheduler.wakeCurrentThreadForCallbackDispatch();
-                if (!invokeInit(0)) {
+                // Wake only once the callback is set up: the wake drops the parked context the
+                // plain-return fallback restores from.
+                if (invokeInit(0)) {
+                    System.getInstance().scheduler.wakeCurrentThreadForCallbackDispatch();
+                } else {
                     this._restoreAsyncContext(info, cpu, returnValue, cleanupBytes, completionName, deferredWrites);
                 }
                 return;

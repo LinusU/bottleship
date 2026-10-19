@@ -15,6 +15,7 @@ import { exports as kernelExports } from "../../src/worker/modules/kernel32/loca
 import { invalidateLocaleCache } from "../../src/worker/modules/kernel32/locale-data";
 import { EmulatorConfig } from "../../src/worker/core/emulator-config-manager";
 import { System } from "../../src/worker/core/system";
+import { Mem } from "../../src/worker/core/memory/mem-accessor";
 
 const SRC = 0x200;
 const DST = 0x400;
@@ -74,6 +75,7 @@ function compare(
     const fast = callFastPath(name, fastMem, args);
 
     const slowMem = fresh(); seed(slowMem);
+    Mem.bind(() => slowMem);
     const handler = (kernelExports as Record<string, (c: unknown, m: Uint8Array, a: number[]) => number>)[name]!;
     const slow = handler(ctx, slowMem, args);
 
@@ -221,6 +223,14 @@ describe("LCMapStringW fast path agrees with the thunk", () => {
         });
     }
 
+    test("a negative cchDest is ERROR_INVALID_PARAMETER", () => {
+        const r = bothTiers("LCMapStringW", (m) => putWide(m, SRC, "abc"), [0x409, LOWER, SRC, -1, DST, -1]);
+        expect(r.fast).toBeNull();
+        expect(r.slow).toBe(0);
+        expect(r.slowErr).toBe(87);
+        expect(r.slowMem[DST]).toBe(0xcc);
+    });
+
     test("declines sort keys", () => {
         const r = compare("LCMapStringW",
             (m) => putWide(m, SRC, "abc"),
@@ -344,6 +354,7 @@ function bothTiers(name: FastPathName, seed: (m: Uint8Array) => void, args: numb
     const f = withLastError(() => callFastPath(name, fastMem, args));
 
     const slowMem = fresh(); seed(slowMem);
+    Mem.bind(() => slowMem);
     const handler = (kernelExports as Record<string, (c: unknown, m: Uint8Array, a: number[]) => number>)[name]!;
     const sl = withLastError(() => handler(ctx, slowMem, args));
 

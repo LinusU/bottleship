@@ -73,16 +73,24 @@ export function registerWindowPropExports(exports: Record<string, ThunkImplement
         }
 
         switch (idx) {
-            case GWL_WNDPROC:
+            case GWL_WNDPROC: {
                 prev = reportedWndProc(window, wide);
-                window.wndProc = dwNewLong >>> 0;
+                let proc = dwNewLong >>> 0;
+                // Un-subclassing stores back whichever face of the class procedure
+                // GWL_WNDPROC handed out; both are the one class proc, which every identity
+                // check and the text-width choice key on as DefWindowProcA.
+                if (window.isSystemControl && proc !== 0 && proc === getDefWindowProcWAddress()) {
+                    proc = getDefWindowProcAddress();
+                }
+                window.wndProc = proc;
                 // A system control given a guest wndProc is subclassed (e.g. MFC custom
                 // CStatic/CButton that paints itself). It now owns its own painting —
                 // we deliver WM_PAINT to it rather than drawing default chrome.
-                if (window.isSystemControl && (dwNewLong >>> 0) !== 0) {
-                    window.wndProcSubclassed = true;
+                if (window.isSystemControl && proc !== 0) {
+                    window.wndProcSubclassed = proc !== getDefWindowProcAddress();
                 }
                 break;
+            }
             case GWL_ID:
                 prev = window.controlId ?? 0;
                 window.controlId = dwNewLong >>> 0;

@@ -43,6 +43,8 @@ describe("bootloader DllMain table", () => {
         expect([...code.subarray(loop, loop + 5)]).toEqual([0x8b, 0x46, 0x04, 0x85, 0xc0]);
         const jz = loop + 5;
         expect(code[jz]).toBe(0x74);
+        // ESI, the cursor, is saved around the DllMain call.
+        expect([...code.subarray(jz + 2, jz + 12)]).toEqual([0x56, 0x6a, 0x01, 0x6a, 0x01, 0xff, 0x36, 0xff, 0xd0, 0x5e]);
         const done = jz + 2 + code[jz + 1]!;
         expect(code[done]).toBe(0xb8);                       // MOV EAX, peEntry
         expect(view.getUint32(done + 1, true)).toBe(0x401000);

@@ -25,7 +25,7 @@ import {
 import { namedObjects } from './named-objects';
 
 /** Milliseconds from the FILETIME epoch (1601-01-01) to the Unix epoch. */
-const FILETIME_UNIX_EPOCH_MS = 11644473600000n;
+const FILETIME_UNIX_EPOCH_MS = 11644473600000;
 
 /**
  * fileHandle -> the completion port it was associated with. Module scope, not the
@@ -1704,8 +1704,14 @@ const syncModule = (() => {
         const pDueTime = args[1] >>> 0;
         const lPeriod = args[2] | 0;
 
+        const scheduler = System.getInstance().scheduler;
         const timer = waitableTimers.get(hTimer);
         if (!timer) {
+            scheduler.setLastError(6); // ERROR_INVALID_HANDLE
+            return 0;
+        }
+        if (lPeriod < 0) {
+            scheduler.setLastError(ERROR_INVALID_PARAMETER);
             return 0;
         }
 
@@ -1718,7 +1724,6 @@ const syncModule = (() => {
         // advanced in-band with guest execution (virtual time), so it fires deterministically
         // regardless of how long the guest spins. Mirrors winmm timeSetEvent. (HP freeze,
         // root-caused 2026-06-26.)
-        const scheduler = System.getInstance().scheduler;
         const wheel = scheduler.timerWheel;
         if (timer.wheelId !== null) {
             wheel.cancel(timer.wheelId);
@@ -1733,17 +1738,17 @@ const syncModule = (() => {
         if (pDueTime) {
             const low = Mem.readUint32(pDueTime) ?? 0;
             const high = Mem.readUint32(pDueTime + 4) ?? 0;
-            const due100ns = BigInt.asIntN(64, (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0));
-            if (due100ns < 0n) {
-                delayMs = Number(-due100ns / 10000n);
+            // Doubles round past 2^53 (100 ns units), i.e. by microseconds; delays are whole ms.
+            const dueMs = ((high | 0) * 4294967296 + (low >>> 0)) / 10000;
+            if (dueMs < 0) {
+                delayMs = Math.floor(-dueMs);
             } else {
-                const nowFileTimeMs = BigInt(Math.floor(TimeService.getInstance().nowUnixMs())) + FILETIME_UNIX_EPOCH_MS;
-                const remaining = due100ns / 10000n - nowFileTimeMs;
-                delayMs = remaining > 0n ? Number(remaining) : 0;
+                const remaining = Math.floor(dueMs - (TimeService.getInstance().nowUnixMs() + FILETIME_UNIX_EPOCH_MS));
+                delayMs = remaining > 0 ? remaining : 0;
             }
         }
 
-        timer.periodMs = Math.max(0, lPeriod);
+        timer.periodMs = lPeriod;
         const fire = () => { System.getInstance().scheduler.setEvent(hTimer); };
 
         if (timer.periodMs > 0) {

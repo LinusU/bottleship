@@ -89,4 +89,13 @@ describe("SetWaitableTimer due time", () => {
         call("SetWaitableTimer", timer, DUE, 0, 0, 0, 0);
         expect(signaled(timer)).toBe(false);
     });
+
+    test("an unknown handle and a negative period fail with their error codes", () => {
+        setDue(-10000n);
+        expect(call("SetWaitableTimer", 0xdead, DUE, 0, 0, 0, 0)).toBe(0);
+        expect(sched.getLastError()).toBe(6);       // ERROR_INVALID_HANDLE
+        const timer = call("CreateWaitableTimerW", 0, 1, 0);
+        expect(call("SetWaitableTimer", timer, DUE, -1, 0, 0, 0)).toBe(0);
+        expect(sched.getLastError()).toBe(87);      // ERROR_INVALID_PARAMETER
+    });
 });

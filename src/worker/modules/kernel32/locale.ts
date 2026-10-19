@@ -1267,12 +1267,16 @@ function mapCaseSimple(src: string, upper: boolean): string {
  *  writer that reserves a terminator slot hands it back L'\0' for every capital. */
 function writeCaseMappedW(mem: Uint8Array, lpDestStr: number, cchDest: number, mapped: string, withNul: boolean): number {
     const outLen = mapped.length + (withNul ? 1 : 0);
+    if (cchDest < 0) { setLastError(ERROR_INVALID_PARAMETER); return 0; }
     if (cchDest === 0) return outLen;
     if (cchDest < outLen) { setLastError(ERROR_INSUFFICIENT_BUFFER); return 0; }
     if (!lpDestStr || lpDestStr + outLen * 2 > mem.length) { setLastError(ERROR_INVALID_PARAMETER); return 0; }
-    const view = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
-    for (let i = 0; i < mapped.length; i++) view.setUint16(lpDestStr + i * 2, mapped.charCodeAt(i), true);
-    if (withNul) view.setUint16(lpDestStr + mapped.length * 2, 0, true);
+    for (let i = 0; i < outLen; i++) {
+        if (!Mem.writeUint16(lpDestStr + i * 2, i < mapped.length ? mapped.charCodeAt(i) : 0)) {
+            setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    }
     return outLen;
 }
 
