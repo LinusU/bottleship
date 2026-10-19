@@ -18,7 +18,7 @@ import { Mem } from '../../core/memory/mem-accessor';
 import { System } from '../../core/system';
 import { Process } from '../../core/process';
 import { VfsFileHandle, VirtualFileSystem } from '../../runtime/filesystem/vfs';
-import { VFS_FILETIME } from '../../runtime/filesystem/file-time';
+import { fileTimeOf } from '../../runtime/filesystem/file-time';
 import { noteBootFileActivity } from '../../runtime/boot-status';
 import { EmulatorConfig } from '../../core/emulator-config-manager';
 import { getCodePageDecoder } from '../codepage-utils';
@@ -186,6 +186,12 @@ const GENERIC_WRITE = 0x40000000;
 const OPEN_EXISTING = 3;
 const CREATE_ALWAYS = 2;
 const FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000;
+
+/** The time the file behind a handle reports (see file-time.ts). */
+function handleFileTime(fileHandle: { vfsHandle?: VfsFileHandle } | null | undefined): bigint {
+    const path = fileHandle?.vfsHandle?.path;
+    return fileTimeOf(path ? System.getInstance().fileSystem.statEntry(path) : null);
+}
 
 /** Record the caller's declared access pattern on the file object. NT takes this at
  *  face value and reads ahead on it; below us it is what tells the block cache that a
@@ -614,6 +620,18 @@ const fileIoModule = (() => {
         return exports['OpenFile']!(ctx, mem, [lpPathName, 0, iReadWrite]);
     };
 
+    // _lcreat - create or truncate for read/write; iAttribute's low bits are FILE_ATTRIBUTE_*.
+    // INVALID_HANDLE_VALUE and HFILE_ERROR are both -1.
+    exports['_lcreat'] = (ctx, mem, args) => exports['CreateFileA']!(ctx, mem, [
+        args[0],
+        0xC0000000, // GENERIC_READ|GENERIC_WRITE
+        3,          // FILE_SHARE_READ|FILE_SHARE_WRITE
+        0,
+        2,          // CREATE_ALWAYS
+        args[1] & 7,
+        0,
+    ]);
+
     exports['CreateFileW'] = (ctx, mem, args) => {
         const lpFileName = args[0];
         const dwDesiredAccess = args[1];
@@ -943,7 +961,7 @@ const fileIoModule = (() => {
         let mappingFile: VfsFileHandle | null = null;
         const vfs0 = System.getInstance().fileSystem;
 
-        if (hFile !== INVALID_HANDLE_VALUE && hFile !== 0) {
+        if ((hFile >>> 0) !== (INVALID_HANDLE_VALUE >>> 0) && hFile !== 0) {
             const resourceProvider = System.getInstance().resourceProvider;
             const fileObj = resourceProvider.getFileHandle(hFile);
             if (!fileObj || isConsoleDeviceHandle(fileObj)) {
@@ -994,7 +1012,7 @@ const fileIoModule = (() => {
         let mappingFile: VfsFileHandle | null = null;
         const vfs0 = System.getInstance().fileSystem;
 
-        if (hFile !== INVALID_HANDLE_VALUE && hFile !== 0) {
+        if ((hFile >>> 0) !== (INVALID_HANDLE_VALUE >>> 0) && hFile !== 0) {
             const resourceProvider = System.getInstance().resourceProvider;
             const fileObj = resourceProvider.getFileHandle(hFile);
             if (!fileObj || isConsoleDeviceHandle(fileObj)) {
@@ -1827,6 +1845,50 @@ const fileIoModule = (() => {
         }
     };
 
+    // _hread - the Win16 "huge" read; identical to _lread on Win32.
+    exports['_hread'] = (ctx, mem, args) => exports['_lread']!(ctx, mem, args);
+
+    // _hwrite - returns the bytes written; a zero count truncates the file at the cursor.
+    exports['_hwrite'] = (ctx, mem, args) => {
+        const hFile = args[0];
+        const lpBuffer = args[1];
+        const count = args[2] >>> 0;
+
+        const fileHandle = System.getInstance().resourceProvider.getFileHandle(hFile);
+        const vfsHandle = (fileHandle as FileHandleWrapper | undefined)?.vfsHandle;
+        if (!fileHandle || !vfsHandle) {
+            System.getInstance().scheduler.setLastError(ERROR_INVALID_HANDLE);
+            return HFILE_ERROR;
+        }
+        const vfs = System.getInstance().fileSystem;
+
+        if (count === 0) {
+            return vfs.truncateAt(vfsHandle.path, vfsHandle.position ?? 0)
+                .then(() => ({ value: 0 }))
+                .catch(() => {
+                    System.getInstance().scheduler.setLastError(ERROR_ACCESS_DENIED);
+                    return { value: HFILE_ERROR };
+                });
+        }
+        if (!lpBuffer || lpBuffer + count > mem.length) {
+            System.getInstance().scheduler.setLastError(ERROR_NOACCESS);
+            return HFILE_ERROR;
+        }
+
+        const data = mem.slice(lpBuffer, lpBuffer + count);
+        const syncWritten = vfs.writeSync(vfsHandle, data);
+        if (syncWritten >= 0) return syncWritten;
+        return fileHandle.write(data).then(
+            (written: number) => ({ value: written }),
+            () => {
+                System.getInstance().scheduler.setLastError(ERROR_IO_DEVICE);
+                return { value: HFILE_ERROR };
+            });
+    };
+
+    // _lwrite - the UINT-count form of _hwrite.
+    exports['_lwrite'] = (ctx, mem, args) => exports['_hwrite']!(ctx, mem, args);
+
     exports['GetFileSize'] = (ctx, mem, args) => {
         const hFile = args[0];
         const lpFileSizeHigh = args[1];
@@ -2299,7 +2361,7 @@ const fileIoModule = (() => {
         // +44: nFileIndexHigh (DWORD)
         // +48: nFileIndexLow (DWORD)
         view.setUint32(lpFileInformation + 0, 0x80, true);   // FILE_ATTRIBUTE_NORMAL
-        const fakeTime = VFS_FILETIME;
+        const fakeTime = handleFileTime(fileHandle);
         view.setBigUint64(lpFileInformation + 4, fakeTime, true);
         view.setBigUint64(lpFileInformation + 12, fakeTime, true);
         view.setBigUint64(lpFileInformation + 20, fakeTime, true);
@@ -2360,7 +2422,7 @@ const fileIoModule = (() => {
 
         const view = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
         const fileSize = fileHandle.size >>> 0;
-        const fakeTime = VFS_FILETIME;
+        const fakeTime = handleFileTime(fileHandle);
 
         // FileBasicInfo = 0 (40 bytes)
         if (infoClass === 0) {

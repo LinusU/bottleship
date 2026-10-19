@@ -11,6 +11,8 @@ import {
     D3DRENDERSTATE_ALPHAREF,
     D3DRENDERSTATE_ALPHATESTENABLE,
     D3DRENDERSTATE_CULLMODE,
+    D3DRENDERSTATE_LIGHTING,
+    D3DRENDERSTATE_NORMALIZENORMALS,
     D3DRENDERSTATE_TEXTUREFACTOR,
     D3DRENDERSTATE_ZENABLE,
     D3DRENDERSTATE_ZWRITEENABLE,
@@ -37,8 +39,10 @@ import { RenderFramePool } from "../render-frame";
 import { buildColorTargetState, computeBlendKey } from "../d3d9/d3d9-blend";
 import {
     linkProgram,
+    compileVertexShader,
     computeCubeMask,
     PROG_BIND,
+    type CompiledVs,
 } from "../d3d9/shader";
 import type { AlphaTest } from "../d3d9/shader/sm-wgsl";
 import {
@@ -56,14 +60,28 @@ import {
 } from "../d3d9/ffp-lighting";
 import { DxSamplerCache, dxSamplerShaderStatesKey, type SamplerSpec } from "../shared/dx-sampler";
 import { decodeD3d8TssSampler } from "./d3d8-sampler";
+import { sanitizeViewport } from "../ddraw/types";
 import { pixelCenterClipOffset, withPixelCenterVersion } from "../pixel-center";
 import { buildD3D8PipelineKey, D3D8ShaderRegistry } from "./d3d8-shader-registry";
+import {
+    describeDeclInputs,
+    ffpVertexSpecKey,
+    FFP_SYNTH_CONSTANT_COUNT,
+    FFP_SYNTH_MAX_TEXCOORDS,
+    FFP_SYNTH_POSITION,
+    isFfpVertexSpecSupported,
+    synthesizeFfpVertexShader,
+    writeFfpVertexConstants,
+    type FfpVertexSpec,
+} from "./ffp-vertex-synth";
 import type { D3D8DeviceAdapter } from "./d3d8-device-adapter";
 import type { DDrawWebGPUExecutor } from "../ddraw/ddraw-backend-executor";
 
 /** D3DTSS_CONSTANT — not in the shared ddraw constants table; mirrors d3d9-device.ts's
  *  own local definition (same D3D8/9 TSS index numbering). */
 const D3DTSS_CONSTANT = 32;
+const D3DRENDERSTATE_VERTEXBLEND = 151;
+const D3DTS_TEXTURE0 = 16;
 
 /**
  * Pipeline-cache identity of the fixed-function cascade a vertex-shader draw with NO pixel
@@ -93,6 +111,9 @@ export class D3D8ProgrammableRenderer {
     private readonly ffpHybridParams: FfpUniformParams = makeFfpParams();
     private readonly ffpHybridBlock = new Float32Array(FFP_UNIFORM_FLOATS);
     private readonly ffpHybridStagePool: FfpUniformParams["stages"][number][] = [];
+    /** Synthesized fixed-function vertex stages, by ffpVertexSpecKey. */
+    private readonly ffpVertexShaders = new Map<string, CompiledVs>();
+    private readonly ffpVertexConstants = new Float32Array(FFP_SYNTH_CONSTANT_COUNT * 4);
 
     constructor(private backend: WebGPUBackend) {
         this.backendExecutor = new D3D9BackendExecutor(backend);
@@ -109,6 +130,55 @@ export class D3D8ProgrammableRenderer {
 
     hasPendingWork(): boolean {
         return this.commandRecorder.hasWork();
+    }
+
+    /**
+     * The vertex stage for a declaration-only vertex shader paired with a pixel shader:
+     * D3D runs fixed-function vertex processing into the programmable pixel stage, so the
+     * link gets that processing as synthesized vs_1_1 (ffp-vertex-synth.ts). Null when the
+     * draw is not that pairing or needs fixed-function work the synthesis does not cover
+     * (lighting, vertex blending); such a draw stays on the fixed-function path.
+     */
+    resolveFfpVertexStage(
+        adapter: D3D8DeviceAdapter,
+        shaders: D3D8ShaderRegistry,
+    ): { compiled: CompiledVs; key: string } | null {
+        const vsObj = shaders.getActiveVs();
+        if (!vsObj || vsObj.compiled) return null;
+        const ps = shaders.getActivePs()?.compiled;
+        if (!ps) return null;
+        if (this.getRS(adapter, D3DRENDERSTATE_LIGHTING) !== 0) return null;
+        if (this.getRS(adapter, D3DRENDERSTATE_VERTEXBLEND) !== 0) return null;
+        const inputs = describeDeclInputs(vsObj.decl);
+        if (!inputs.hasPosition) return null;
+
+        const outputs = new Set<number>(ps.analysis.readsTexcoord);
+        for (const n of ps.analysis.samplers) outputs.add(n);
+        const ts = adapter.textureStates;
+        const spec: FfpVertexSpec = {
+            hasDiffuse: inputs.hasDiffuse,
+            hasSpecular: inputs.hasSpecular,
+            hasNormal: inputs.hasNormal,
+            normalizeNormals: this.getRS(adapter, D3DRENDERSTATE_NORMALIZENORMALS) !== 0,
+            texcoordComponents: inputs.texcoordComponents,
+            texcoords: [...outputs].filter(n => n < FFP_SYNTH_MAX_TEXCOORDS).sort((a, b) => a - b).map(n => {
+                const tci = ts[n * 32 + D3DTSS_TEXCOORDINDEX] >>> 0;
+                return {
+                    output: n,
+                    mode: tci >>> 16,
+                    set: tci & 0xffff,
+                    transformFlags: ts[n * 32 + D3DTSS_TEXTURETRANSFORMFLAGS] | 0,
+                };
+            }),
+        };
+        if (!isFfpVertexSpecSupported(spec)) return null;
+        const key = ffpVertexSpecKey(spec);
+        let compiled = this.ffpVertexShaders.get(key);
+        if (!compiled) {
+            compiled = compileVertexShader(synthesizeFfpVertexShader(spec));
+            this.ffpVertexShaders.set(key, compiled);
+        }
+        return { compiled, key };
     }
 
     /**
@@ -236,13 +306,13 @@ export class D3D8ProgrammableRenderer {
     }
 
     /**
-     * Content hash of `len` PS uniform words, mirroring d3d9-device.ts's
+     * Content hash of `len` uniform words, mirroring d3d9-device.ts's
      * copyConstantPrefixWithKey. The hybrid path has no SetPixelShaderConstant call to derive
      * a version from (it's driven by SetRenderState/SetTextureStageState instead), so the
      * cached-draw-state elision in render-frame.ts needs a real hash of the packed bytes —
      * a stage-state change between two otherwise-identical draws must not be cached away.
      */
-    private hashPsConstants(bits: Uint32Array, len: number): number {
+    private hashConstants(bits: Uint32Array, len: number): number {
         let h1 = 0x811c9dc5;
         let h2 = (0x9e3779b9 ^ len) >>> 0;
         for (let i = 0; i < len; i++) {
@@ -335,9 +405,11 @@ export class D3D8ProgrammableRenderer {
         indexFormat?: GPUIndexFormat,
     ): number {
         const vsObj = shaders.getActiveVs();
-        if (!vsObj?.compiled) return -1;
+        if (!vsObj) return -1;
+        const ffpVertex = vsObj.compiled ? null : this.resolveFfpVertexStage(adapter, shaders);
+        const vs = vsObj.compiled ?? ffpVertex?.compiled;
+        if (!vs) return -1;
         const psObj = shaders.getActivePs();
-        const vs = vsObj.compiled;
         const ps = psObj?.compiled ?? null;
         const stream0 = adapter.streamSources[0];
         const stride = strideOverride ?? (stream0.stride > 0 ? stream0.stride : null);
@@ -365,7 +437,8 @@ export class D3D8ProgrammableRenderer {
             this.blendKey(adapter),
             this.alphaTestKey(adapter),
             cubeMask,
-            buildD3D8FfpVariantKey(hybridStages, projectedMask, hybridSamplers),
+            buildD3D8FfpVariantKey(hybridStages, projectedMask, hybridSamplers)
+                + (ffpVertex ? `:fv${ffpVertex.key}` : ""),
         );
         const cached = this.progPipelineCache.get(cacheKey);
         if (cached !== undefined) return cached;
@@ -383,6 +456,7 @@ export class D3D8ProgrammableRenderer {
                 ffpStageCount: hybridStages || undefined,
                 samplerStates: hybridSamplers ?? undefined,
                 projectedStages: projectedMask,
+                fixedFunctionPosition: ffpVertex ? FFP_SYNTH_POSITION : null,
             });
             if (link.interpolantBudgetExceeded) {
                 throw new Error("D3D8 shader link exceeds WebGPU inter-stage interpolant budget");
@@ -461,8 +535,11 @@ export class D3D8ProgrammableRenderer {
     ): number {
         const vsObj = shaders.getActiveVs();
         const psObj = shaders.getActivePs();
-        const vs = vsObj?.compiled ?? null;
+        const ffpVertex = vsObj && !vsObj.compiled ? this.resolveFfpVertexStage(adapter, shaders) : null;
+        const vs = vsObj?.compiled ?? ffpVertex?.compiled ?? null;
         const ps = psObj?.compiled ?? null;
+        // The linker places the hidden pixel-centre vec4 right after the program's own
+        // constant count, so a synthesized bank is cut to that count like a guest one.
         const vsConstantLen = Math.min(vs ? vs.analysis.constantCount : 0, 256) * 4;
         const vsLen = vsConstantLen + 4; // hidden c[] pixel-centre tail
         // A bound VS with NO pixel shader still needs the fixed-function texture-stage
@@ -478,13 +555,25 @@ export class D3D8ProgrammableRenderer {
         const index = frame.drawStateCount;
         const state = frame.nextDrawState(vsLen, psLen);
 
-        state.vsConst.set(shaders.vsConstants.subarray(0, vsConstantLen));
         const { dx, dy } = pixelCenterClipOffset(adapter.viewport.width, adapter.viewport.height);
+        if (ffpVertex) {
+            const rt = adapter.activeRenderTarget;
+            writeFfpVertexConstants(this.ffpVertexConstants, adapter.getMVP(), adapter.getWorldViewMatrix(),
+                (stage) => adapter.getTransform(D3DTS_TEXTURE0 + stage),
+                sanitizeViewport(adapter.viewport, rt.width, rt.height));
+            state.vsConst.set(this.ffpVertexConstants.subarray(0, vsConstantLen));
+        } else {
+            state.vsConst.set(shaders.vsConstants.subarray(0, vsConstantLen));
+        }
         state.vsConst[vsConstantLen + 0] = dx;
         state.vsConst[vsConstantLen + 1] = dy;
         state.vsConst[vsConstantLen + 2] = 0;
         state.vsConst[vsConstantLen + 3] = 0;
-        state.vsVersion = withPixelCenterVersion(shaders.vsConstantsVersion, dx, dy);
+        // The synthesized bank follows SetTransform, which bumps no constant version, so its
+        // identity for draw-state elision is the packed content itself.
+        state.vsVersion = ffpVertex
+            ? this.hashConstants(state.vsBits, vsLen)
+            : withPixelCenterVersion(shaders.vsConstantsVersion, dx, dy);
         if (ps) {
             state.psConst.set(shaders.psConstants.subarray(0, psLen));
             state.psVersion = shaders.psConstantsVersion;
@@ -505,7 +594,7 @@ export class D3D8ProgrammableRenderer {
                 ),
                 8 + FFP_MAX_STAGES * 8,
             );
-            state.psVersion = this.hashPsConstants(state.psBits, psLen);
+            state.psVersion = this.hashConstants(state.psBits, psLen);
         }
 
         const cubeMask = computeCubeMask(ps) | this.boundCubeMask(adapter);

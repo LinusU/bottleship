@@ -17,6 +17,8 @@ export interface VfsEntry {
     kind: VfsEntryKind;
     size: number;
     source: "rom" | "overlay";
+    /** Last-write time (Unix seconds) the ROM entry records; absent when storage has none. */
+    modified?: number;
 }
 
 export interface VfsFileHandle {
@@ -1772,6 +1774,7 @@ export class VirtualFileSystem {
                 kind: "file",
                 size: fileEntry.uncompressedSize,
                 source: "rom",
+                ...(fileEntry.modified !== undefined ? { modified: fileEntry.modified } : {}),
             };
         }
 
@@ -1867,6 +1870,7 @@ export class VirtualFileSystem {
                 kind: "file",
                 size: entry.uncompressedSize,
                 source: "rom",
+                ...(entry.modified !== undefined ? { modified: entry.modified } : {}),
             });
         }
 

@@ -91,6 +91,10 @@ export function runGuestRoutine(
                 input = E_FAIL;
                 continue;
             }
+            // A routine may call an API stub directly (LoadLibraryA, a COM method of an HLE
+            // object); entered this way its return address is a callback stub, which is a
+            // window procedure's contract, not a desynced stack.
+            process?.dispatcher?.markWndProcStub?.(call.fn >>> 0);
             let invoked: { callbackId: number };
             try {
                 invoked = callbackManager.invokeCallback(

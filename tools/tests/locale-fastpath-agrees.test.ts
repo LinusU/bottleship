@@ -195,13 +195,29 @@ describe("LCMapStringW fast path agrees with the thunk", () => {
             expect(r.fast).toBe(r.slow);
         });
 
-        test(`${flagName}: a destination smaller than the source truncates like the thunk`, () => {
+        test(`${flagName}: a destination smaller than the source fails instead of truncating`, () => {
             const text = "LongResourceName";
-            const r = compare("LCMapStringW",
+            const { value: r, err } = withLastError(() => compare("LCMapStringW",
                 (m) => putWide(m, SRC, text),
-                [0x409, flag, SRC, text.length, DST, 5]);
+                [0x409, flag, SRC, text.length, DST, 5]));
+            expect(r.fast).toBeNull();
+            expect(r.slow).toBe(0);
+            expect(err).toBe(122); // ERROR_INSUFFICIENT_BUFFER
+            expect(r.slowMem[DST]).toBe(0xcc);
+        });
+
+        test(`${flagName}: a counted source gets exactly that many characters, no terminator`, () => {
+            // The CRT's _tolower: one character in, one out, into a one-WCHAR buffer.
+            const ch = flag === LOWER ? "V" : "v";
+            const r = compare("LCMapStringW",
+                (m) => putWide(m, SRC, ch, false),
+                [0x409, flag, SRC, 1, DST, 1]);
+            expect(r.slow).toBe(1);
             expect(r.fast).toBe(r.slow);
-            expect([...r.fastMem.subarray(DST, DST + 12)]).toEqual([...r.slowMem.subarray(DST, DST + 12)]);
+            const want = flag === LOWER ? "v" : "V";
+            expect(new DataView(r.slowMem.buffer).getUint16(DST, true)).toBe(want.charCodeAt(0));
+            expect([...r.fastMem.subarray(DST, DST + 4)]).toEqual([...r.slowMem.subarray(DST, DST + 4)]);
+            expect(r.slowMem[DST + 2]).toBe(0xcc);
         });
     }
 
@@ -219,9 +235,9 @@ describe("LCMapStringW fast path agrees with the thunk", () => {
             (m) => putWide(m, SRC, "AİB"),
             [0x409, LOWER, SRC, 3, DST, 64]);
         expect(r.fast).toBe(r.slow);
-        // 3 source chars + the terminator this implementation always writes. Full case
-        // mapping would have made it 5.
-        expect(r.slow).toBe(4);
+        // 3 source chars and no terminator, since cchSrc did not count one. Full case
+        // mapping would have made it 4.
+        expect(r.slow).toBe(3);
         expect([...r.fastMem.subarray(DST, DST + 8)]).toEqual([...r.slowMem.subarray(DST, DST + 8)]);
     });
 });

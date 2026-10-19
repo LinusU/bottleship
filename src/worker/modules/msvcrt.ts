@@ -34,6 +34,7 @@ import { ensureNativeCBsearch } from "./crt-cbsearch";
 import { LARGE_IO_TRACE_ENABLED, traceLargeRead } from "../core/diagnostics/large-io-trace";
 import { registerVc9AbiExports } from "./crt-vc9-abi";
 import { registerVc9IoExports, resetVc9TimeStatics, fillStatStruct, STAT32_OFFSETS } from "./crt-vc9-io";
+import { unixTimeOf } from "../runtime/filesystem/file-time";
 import { registerVc9SetjmpExports } from "./crt-vc9-setjmp";
 import { registerCrtMathExports } from "./crt-math";
 import { registerCrtTimeExports, resetCrtTimeStatics } from "./crt-time";
@@ -2037,7 +2038,7 @@ export class Msvcrt implements IModule {
             return -1;
         }
         fillStatStruct(structPtr, STAT32_OFFSETS, 36, vfs.getFileSize(path), false,
-            (p, v, n) => this.memset(p, v, n));
+            (p, v, n) => this.memset(p, v, n), unixTimeOf(vfs.statEntry(path)));
         return 0;
     }
 

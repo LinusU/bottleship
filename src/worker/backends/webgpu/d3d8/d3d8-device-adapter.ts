@@ -542,6 +542,15 @@ export class D3D8DeviceAdapter implements RenderActive, FFPLightingSource {
         return this.shaders.isProgrammable();
     }
 
+    /** Whether a draw runs through the programmable link: a compiled vertex shader, or a
+     *  declaration-only one paired with a pixel shader, whose fixed-function vertex stage
+     *  the link receives synthesized (D3D8ProgrammableRenderer.resolveFfpVertexStage). */
+    private usesProgrammableLink(): boolean {
+        if (!this.programmable) return false;
+        return this.shaders.isProgrammable()
+            || this.programmable.resolveFfpVertexStage(this, this.shaders) !== null;
+    }
+
     isDeclOnly(): boolean {
         return this.shaders.isDeclOnly();
     }
@@ -1566,6 +1575,7 @@ export class D3D8DeviceAdapter implements RenderActive, FFPLightingSource {
                 minZ: this.viewport.minZ ?? 0, maxZ: this.viewport.maxZ ?? 1,
             },
             lighting: this.getFFPLightingState(),
+            pixelShader: this.pixelShaderHandle,
             executionDiagnostics: (this.renderer as any).getLastDrawDiagnostics?.() ?? null,
         });
     }
@@ -1816,7 +1826,7 @@ export class D3D8DeviceAdapter implements RenderActive, FFPLightingSource {
 
         const mem = this.getMemoryView();
 
-        if (this.isProgrammable() && this.programmable) {
+        if (this.programmable && this.usesProgrammableLink()) {
             if (this.renderer.scrubDraw()) return 0;
             const gpuBuffer = this.uploadVb(this.streamSources[0].vb, vb.guestPtr, vb.size, mem);
             if (!gpuBuffer) return 0x8876086c;
@@ -1917,7 +1927,7 @@ export class D3D8DeviceAdapter implements RenderActive, FFPLightingSource {
             return 0x8876086c;
         }
 
-        if (this.isProgrammable() && this.programmable) {
+        if (this.programmable && this.usesProgrammableLink()) {
             if (this.renderer.scrubDraw()) return 0;
             const device = this.getGpuDevice();
             if (!device) return 0x8876086c;
@@ -2048,7 +2058,7 @@ export class D3D8DeviceAdapter implements RenderActive, FFPLightingSource {
 
         const mem = this.getMemoryView();
 
-        if (this.isProgrammable() && this.programmable) {
+        if (this.programmable && this.usesProgrammableLink()) {
             if (this.renderer.scrubDraw()) return 0;
             const vbGpu = this.uploadVb(this.streamSources[0].vb, vb.guestPtr, vb.size, mem);
             const ibGpu = this.uploadIb(this.indexIB, ib.guestPtr, ib.size, mem);
@@ -2183,7 +2193,7 @@ export class D3D8DeviceAdapter implements RenderActive, FFPLightingSource {
             return 0x8876086c;
         }
 
-        if (this.isProgrammable() && this.programmable) {
+        if (this.programmable && this.usesProgrammableLink()) {
             if (this.renderer.scrubDraw()) return 0;
             const device = this.getGpuDevice();
             if (!device) return 0x8876086c;

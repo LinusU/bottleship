@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Extract an installer (or a ZIP wrapping one) through the shared self-hosted format registry. */
-import { mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, utimesSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { inflateRawSync } from 'node:zlib';
@@ -43,7 +43,11 @@ if (!list) {
     mkdirSync(output, { recursive: true });
     for (const e of entries) {
         mkdirSync(e.directory ? e.path : dirname(e.path), { recursive: true });
-        if (!e.directory) writeFileSync(e.path, e.data, { flag: 'wx' });
+        if (e.directory) continue;
+        writeFileSync(e.path, e.data, { flag: 'wx' });
+        // make-wgb packs the mtime, and a game may check its files' dates.
+        const t = result.fileTimes?.get(e.name);
+        if (t !== undefined) utimesSync(e.path, t, t);
     }
 } else {
     for (const e of entries) console.log(`${e.directory ? '<DIR>' : e.data.length}\t${e.name}`);

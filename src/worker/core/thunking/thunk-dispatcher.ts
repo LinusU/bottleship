@@ -3962,6 +3962,43 @@ export class ThunkDispatcher {
                 `[DllMain] Invoking ${dllInits.length} DllMain(s) for ${completionName}: ` +
                 `${dllInits.map(d => `${d.name}@0x${d.entryPoint.toString(16)}`).join(', ')}`);
 
+            // LoadLibrary entered AS a callback target (an HLE routine loading a DLL the way
+            // the real one does — d3dx9 binding d3dcompiler) returns into the outer callback's
+            // live stub, which a suspended frame may not hold. Run the DllMains as direct
+            // thunk returns instead: they resume exactly where LoadLibrary's RET N would have.
+            const stubPool = this._callbackManager.getStubPoolRange();
+            const ret = (returnAddr ?? 0) >>> 0;
+            if (ret >= stubPool.base && ret < stubPool.end) {
+                const callbacks = this._callbackManager;
+                const direct = {
+                    returnAddr: ret,
+                    postEsp: (esp + 4 + cleanupBytes) >>> 0,
+                    entryEsp: esp >>> 0,
+                    complete: (_ret: number): number | null => {
+                        next++;
+                        return next < dllInits.length && invokeInit(next) ? null : baseAddress;
+                    },
+                };
+                let next = 0;
+                const invokeInit = (index: number): boolean => {
+                    const init = dllInits[index];
+                    try {
+                        return callbacks.invokeCallback(
+                            init.entryPoint, [init.baseAddress, 1, 0], 0, undefined, false,
+                            'DllMainChain', undefined, { directThunkReturn: direct },
+                        ).callbackId !== 0;
+                    } catch (e) {
+                        Logger.warn(LogCategory.THUNK, `[DllMain] Failed to invoke ${init.name}: ${e}`);
+                        return false;
+                    }
+                };
+                System.getInstance().scheduler.wakeCurrentThreadForCallbackDispatch();
+                if (!invokeInit(0)) {
+                    this._restoreAsyncContext(info, cpu, returnValue, cleanupBytes, completionName, deferredWrites);
+                }
+                return;
+            }
+
             const dllMainFrameId = this._callbackManager.saveSuspendedThunkContext(
                 { esp, returnAddr } as unknown as X86Context,
                 cleanupBytes,

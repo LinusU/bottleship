@@ -82,8 +82,8 @@ describe("ddraw/d3d8 FFP shader generator — no writable component swizzles", (
 
     test("the z transforms still write position, through a whole vec4", () => {
         const remap = generateShaderCode(config({}));
-        expect(remap).toContain("let zRemapPos = out.position;");
-        expect(remap).toContain("out.position = vec4f(zRemapPos.xy, z_ndc2 * zRemapPos.w, zRemapPos.w);");
+        expect(remap).toContain("out.position = d3dTransformPosition(uniforms.mvp, pos.xyz, uniforms.minZ, uniforms.maxZ);");
+        expect(remap).toContain("return vec4<f32>(c.xy, (zNdc * (maxZ - minZ) + minZ) * c.w, c.w);");
         expect(remap).toContain("out.position = vec4f(clipPos.xy, clamp(zNdc, 0.0, 1.0) * zw, zw);");
 
         const midpoint = generateShaderCode(
